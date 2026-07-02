@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>支払い</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body style="text-align:center; font-family:sans-serif;">
+
+    <h1>お支払い</h1>
+
+    <h2>{{ $payment->amount }} 円</h2>
+
+    <p>この金額をお支払いください</p>
+
+    <button onclick="pay()">支払う</button>
+
+    <button id="pay-button" class="bg-blue-500 text-white px-4 py-2 rounded">
+        決済する ({{ $payment->amount }} JPYC)
+    </button>
+
+    <p id="status"></p>
+
+    <!-- <script src="/js/ethers.umd.min.js"></script> -->
+
+    <script type="module">
+    import { ethers } from "https://unpkg.com/ethers@6.9.2/dist/ethers.min.js";
+
+    // --- 1. MetaMask接続 ---
+    async function connectWallet() {
+        if (!window.ethereum) {
+            alert("MetaMaskが必要です");
+            return;
+        }
+        const accounts = await ethereum.request({ method: 'eth_requestAccounts' });
+        return accounts[0];
+    }
+
+    // --- 2. ERC20コントラクト情報 ---
+    const ERC20_ABI = [
+        "function balanceOf(address) view returns (uint256)",
+        "function transfer(address to, uint256 amount) returns (bool)",
+        "function decimals() view returns (uint8)"
+    ];
+
+    // Bladeから渡された値
+    const TOKEN_ADDRESS = "0xff9409141aDb261CAEB1dA1F9975B1F48057D360"; // 自分のERC20アドレス
+    const PAYMENT_AMOUNT = "{{ $payment->amount }}"; // DBの金額
+    const STORE_WALLET = "0x923bFce1ac4D318441700f26Ad4ECaF39522e32A"; // 店舗ウォレット
+    const PAYMENT_ID = "{{ $payment->id }}";
+
+    async function payWithERC20() {
+        let signerAddress = await connectWallet();
+        if (!signerAddress) return;
+
+        const provider = new ethers.BrowserProvider(window.ethereum);
+        const signer = await provider.getSigner();
+        const tokenContract = new ethers.Contract(TOKEN_ADDRESS, ERC20_ABI, signer);
+
+        // --- 3. decimals取得 & amount変換 ---
+        const decimals = await tokenContract.decimals();
+        const amountWithDecimals = ethers.parseUnits(PAYMENT_AMOUNT, decimals);
+
+        // --- 4. 残高チェック ---
+        const balance = await tokenContract.balanceOf(signerAddress);
+        if (balance < amountWithDecimals) {
+            alert("残高不足です");
+            return;
+        }
+
+        // 👇 ここで確認
+signerAddress = await signer.getAddress();
+console.log("送金元:", signerAddress);
+console.log("送金先:", STORE_WALLET);
+
+        // --- 5. transfer 実行 ---
+        try {
+            const tx = await tokenContract.transfer(STORE_WALLET, amountWithDecimals);
+            console.log("Transaction sent:", tx.hash);
+
+            // --- 6. サーバーに tx_hash を送信 ---
+            const res = await fetch(`/api/payments/${PAYMENT_ID}/confirm`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-CSRF-TOKEN": "{{ csrf_token() }}"
+                },
+                body: JSON.stringify({
+                    payment_id: PAYMENT_ID,
+                    tx_hash: tx.hash,
+                    token_address: TOKEN_ADDRESS,
+                    amount: PAYMENT_AMOUNT
+                })
+            });
+
+            // const data = await res.json();
+
+            const text = await res.text();
+            console.log("レスポンス:", text);
+
+            let data;
+            try {
+                data = JSON.parse(text);
+            } catch (e) {
+                alert("サーバーエラー");
+                return;
+            }
+
+            if (data.success) {
+                alert("決済成功！");
+                window.location.reload();
+            } else {
+                alert("決済確認失敗");
+            }
+
+        } catch(err) {
+            console.error(err);
+            alert("決済失敗: " + err.message);
+        }
+    }
+
+    // --- 7. ボタンに紐づけ ---
+    document.getElementById("pay-button").addEventListener("click", payWithERC20);
+    </script>
+
+</body>
+</html>

@@ -1,0 +1,22 @@
+[90m= [39m[34;4mApp\Models\Store[39;24m {#8153
+    [34mid[39m: [35m1[39m,
+    [34mstore_code[39m: [32m"[39m[32mtest001[39m[32m"[39m,
+    [34mstore_pin[39m: [32m"[39m\$[32m2y[39m\$[32m12[39m\$[32mIElnGKwFQG0zJfmrR6n90OSU8VRe13RswVRI9I7I5rwLaAz9D4/ES[39m[32m"[39m,
+    [34mname[39m: [32m"[39m[32mテスト店舗[39m[32m"[39m,
+    [34mcreated_at[39m: [32m"[39m[32m2026-04-05 10:20:04[39m[32m"[39m,
+    [34mupdated_at[39m: [32m"[39m[32m2026-04-05 10:20:04[39m[32m"[39m,
+    [34mstaffs[39m: [34;4mIlluminate\Database\Eloquent\Collection[39;24m {#8155
+      [34mall[39m: [
+        [34;4mApp\Models\Staff[39;24m {#8157
+          [34mid[39m: [35m1[39m,
+          [34mstore_id[39m: [35m1[39m,
+          [34mstaff_id[39m: [32m"[39m[32ms001[39m[32m"[39m,
+          [34mname[39m: [32m"[39m[32m太郎[39m[32m"[39m,
+          [34mpin[39m: [32m"[39m\$[32m2y[39m\$[32m12[39m\$[32mGKKu3r2kTlFPwfu0Z/kOSuYW9VCxYhqHE5D6XD4BLaYMT.pMMin7W[39m[32m"[39m,
+          [34mrole[39m: [32m"[39m[32mmanager[39m[32m"[39m,
+          [34mcreated_at[39m: [32m"[39m[32m2026-04-05 10:26:38[39m[32m"[39m,
+          [34mupdated_at[39m: [32m"[39m[32m2026-04-05 10:26:38[39m[32m"[39m,
+        },
+      ],
+    },
+  }
