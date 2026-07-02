@@ -1,58 +1,201 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# JPYC Web3 Payment Platform
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+Laravel・PHP・MySQL・ERC20を用いて開発している、Web3対応QRコード決済プラットフォームです。
 
-## About Laravel
+JPYCなどのステーブルコインを利用し、実店舗で安全かつシンプルに決済できる仕組みの実現を目指しています。
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+---
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+# プロジェクト概要
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+本プロジェクトは、従来のQRコード決済（PayPayなど）のような使いやすさと、ブロックチェーンによる透明性を組み合わせた決済システムです。
 
-## Learning Laravel
+現在はバックエンドを中心に開発を進めており、
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework.
+- REST API設計
+- データベース設計
+- ERC20トークン決済
+- トランザクション検証
 
-In addition, [Laracasts](https://laracasts.com) contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+などを実装しています。
 
-You can also watch bite-sized lessons with real-world projects on [Laravel Learn](https://laravel.com/learn), where you will be guided through building a Laravel application from scratch while learning PHP fundamentals.
+---
 
-## Agentic Development
+# 主な機能
 
-Laravel's predictable structure and conventions make it ideal for AI coding agents like Claude Code, Cursor, and GitHub Copilot. Install [Laravel Boost](https://laravel.com/docs/ai) to supercharge your AI workflow:
+- QRコード決済
+- JPYC（ERC20）決済
+- MetaMask連携
+- REST API
+- 決済トランザクション検証
+- 決済履歴管理
+- ユーザー認証
+- 店舗・スタッフ管理
+- MySQLによるデータ管理
 
-```bash
-composer require laravel/boost --dev
+---
 
-php artisan boost:install
+# 使用技術
+
+## バックエンド
+
+- Laravel
+- PHP
+- MySQL
+- Laravel Sanctum
+
+## フロントエンド
+
+- Blade
+- JavaScript
+- HTML
+- CSS
+
+## ブロックチェーン
+
+- Ethereum
+- ERC20
+- ethers.js
+- MetaMask
+- Sepolia Testnet
+
+## インフラ
+
+- Ubuntu
+- Apache
+- Linux
+
+---
+
+# システム構成
+
+```text
+利用者
+    │
+    ▼
+MetaMask
+    │
+    ▼
+Laravel API
+    │
+    ▼
+MySQL
+    │
+    ▼
+Ethereum（Sepolia）
 ```
 
-Boost provides your agent 15+ tools and skills that help agents build Laravel applications while following best practices.
+---
 
-## Contributing
+# API
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+## ユーザー
 
-## Code of Conduct
+```
+POST /api/user/register
+POST /api/user/login
+POST /api/user/logout
+GET  /api/user/me
+GET  /api/user/payments
+```
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+## 決済
 
-## Security Vulnerabilities
+```
+POST /api/payments/create
+GET  /api/payments/{id}
+GET  /api/payments/status/{id}
+POST /api/payments/{id}/confirm
+```
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+## スタッフ
 
-## License
+```
+POST /api/staff/login
+```
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+---
+
+# データベース
+
+主なテーブル
+
+- users
+- stores
+- staffs
+- wallets
+- payments
+- personal_access_tokens
+
+---
+
+# 開発状況
+
+| 機能 | 状況 |
+|------|------|
+| バックエンドAPI | ✅ 完了 |
+| データベース設計 | ✅ 完了 |
+| ユーザー認証 | ✅ 完了 |
+| ERC20決済検証 | ✅ 完了 |
+| 決済履歴API | ✅ 完了 |
+| フロントエンド | 🚧 開発中 |
+| 管理画面 | 🚧 開発中 |
+| AI支援機能 | 📅 開発予定 |
+
+---
+
+# 今後の開発予定
+
+- レスポンシブUI対応
+- ユーザーウォレット管理
+- QRコード読み取り機能
+- AIによる決済支援
+- 複数ERC20トークン対応
+- 売上分析機能
+- モバイル最適化
+
+---
+
+# このプロジェクトについて
+
+私は「Web3技術を実際の店舗決済へ活用できないか」というテーマから、このプロジェクトを開発しています。
+
+単なる学習用アプリではなく、実際の店舗で利用できることを意識し、
+
+- システム設計
+- API設計
+- データベース設計
+- ブロックチェーン連携
+
+まで一貫して開発しています。
+
+将来的には、AIやデータ分析を組み合わせた次世代のFinTechサービスへ発展させることを目標としています。
+
+---
+
+# 作者
+
+## 中崎 康介（Kousuke Nakasaki）
+
+鹿児島工業高等専門学校 情報工学科
+
+**興味分野**
+
+- Web開発
+- FinTech
+- Web3
+- AI
+- プロダクト設計
+- ソフトウェアアーキテクチャ
+
+---
+
+# ポートフォリオ
+
+現在制作中
+
+---
+
+# ライセンス
+
+本プロジェクトはポートフォリオ・学習目的で公開しています。
