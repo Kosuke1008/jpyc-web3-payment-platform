@@ -34,7 +34,10 @@ async function login() {
         return;
     }
 
-    localStorage.setItem('token', data.token);
+    localStorage.setItem('staff_token', data.token);
+    localStorage.setItem('staff_name', data.staff.name);
+    localStorage.setItem('store_name', data.store.name);
+    window.location.href = '/pos';
     window.location.href = '/pos';
 }
 </script>

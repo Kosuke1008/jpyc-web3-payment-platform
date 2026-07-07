@@ -11,7 +11,7 @@
 
 <p id="user-name"></p>
 
-<a href="/user/payments-page">決済履歴を見る</a>
+<a href="/user/payments">決済履歴を見る</a>
 
 <br><br>
 

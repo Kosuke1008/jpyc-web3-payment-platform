@@ -21,3 +21,7 @@ Route::get('/user/login', function () {
 Route::get('/user/home', function () {
     return view('user.home');
 });
+
+Route::get('/user/payments', function () {
+    return view('user.payments');
+});
