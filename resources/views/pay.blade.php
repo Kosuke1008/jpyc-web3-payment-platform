@@ -1,203 +1,676 @@
 <!DOCTYPE html>
-<html>
+<html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <title>支払い</title>
+    <title>お支払い | Liv Terminal</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
 
     <style>
+        * {
+            box-sizing: border-box;
+        }
+
         body {
+            margin: 0;
+            min-height: 100vh;
+            padding: 24px;
+            background: #f5f7fb;
+            color: #111827;
+            font-family:
+                -apple-system,
+                BlinkMacSystemFont,
+                "Segoe UI",
+                sans-serif;
+        }
+
+        .payment-container {
+            width: 100%;
+            max-width: 480px;
+            margin: 40px auto;
+        }
+
+        .payment-card {
+            padding: 28px 24px;
+            background: #ffffff;
+            border-radius: 18px;
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.08);
             text-align: center;
-            font-family: sans-serif;
-            padding: 20px;
         }
-        button {
+
+        .label {
+            margin: 0 0 8px;
+            color: #6b7280;
+            font-size: 14px;
+        }
+
+        .store-name {
+            margin: 0 0 24px;
             font-size: 18px;
-            padding: 12px 20px;
-            margin-top: 20px;
-            border-radius: 8px;
-            border: none;
-            background-color: #2563eb;
-            color: white;
+            font-weight: 600;
         }
+
+        .amount {
+            margin: 0;
+            font-size: 36px;
+            font-weight: 700;
+        }
+
+        .currency {
+            margin-left: 4px;
+            font-size: 18px;
+        }
+
+        .expires-at {
+            margin-top: 12px;
+            color: #6b7280;
+            font-size: 13px;
+        }
+
+        button {
+            width: 100%;
+            min-height: 52px;
+            margin-top: 20px;
+            padding: 12px 20px;
+            border: none;
+            border-radius: 12px;
+            background: #2563eb;
+            color: #ffffff;
+            font-size: 17px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        button:hover:not(:disabled) {
+            background: #1d4ed8;
+        }
+
         button:disabled {
-            background-color: gray;
+            background: #9ca3af;
+            cursor: not-allowed;
+        }
+
+        .secondary-button {
+            margin-top: 12px;
+            background: #eef2ff;
+            color: #1d4ed8;
+        }
+
+        .secondary-button:hover:not(:disabled) {
+            background: #e0e7ff;
+        }
+
+        #status {
+            min-height: 24px;
+            margin-top: 20px;
+            line-height: 1.6;
+            font-weight: 600;
+        }
+
+        .status-success {
+            color: #15803d;
+        }
+
+        .status-error {
+            color: #dc2626;
+        }
+
+        .status-info {
+            color: #1d4ed8;
+        }
+
+        .wallet-address {
+            margin-top: 16px;
+            color: #6b7280;
+            font-size: 12px;
+            word-break: break-all;
         }
     </style>
 </head>
 
 <body>
+    <main class="payment-container">
+        <section class="payment-card">
+            <p class="label">支払先</p>
 
-    <h1>お支払い</h1>
+            <p class="store-name">
+                {{ $payment->store->name ?? '店舗名未設定' }}
+            </p>
 
-    <h2>{{ $payment->amount }} 円</h2>
+            <p class="amount">
+                {{ number_format($payment->amount) }}
+                <span class="currency">JPYC</span>
+            </p>
 
-    <p>{{ $payment->store->name ?? 'Store' }}</p>
+            <p class="expires-at">
+                有効期限：
+                {{ optional($payment->expires_at)->format('Y-m-d H:i:s') ?? '未設定' }}
+            </p>
 
-    
-<button onclick="connectWallet()">MetaMask接続</button>
-<script src="/js/wallet.js"></script>
+            <button id="connect-button" type="button">
+                MetaMaskを接続
+            </button>
 
-    <button id="pay-button">
-        決済する ({{ $payment->amount }} JPYC)
-    </button>
+            <button id="pay-button" type="button">
+                {{ number_format($payment->amount) }} JPYCを支払う
+            </button>
 
-    <p id="status"></p>
+            <button
+                id="history-button"
+                class="secondary-button"
+                type="button"
+                onclick="location.href='/user/payments'"
+            >
+                決済履歴を見る
+            </button>
+
+            <p id="status" class="status-info">
+                ウォレットを接続してください
+            </p>
+
+            <p id="wallet-address" class="wallet-address"></p>
+        </section>
+    </main>
 
     <script type="module">
-    import { ethers } from "https://unpkg.com/ethers@6.9.2/dist/ethers.min.js";
+        import { ethers } from
+            "https://unpkg.com/ethers@6.9.2/dist/ethers.min.js";
 
-    let isPaying = false;
+        /*
+        |--------------------------------------------------------------------------
+        | 決済設定
+        |--------------------------------------------------------------------------
+        |
+        | TOKEN_ADDRESSとSTORE_WALLETは将来的には.env/configやDBから
+        | 取得する形へ移行してください。
+        |
+        */
 
-    const TOKEN_ADDRESS = "0xff9409141aDb261CAEB1dA1F9975B1F48057D360";
-    const STORE_WALLET = "0x923bFce1ac4D318441700f26Ad4ECaF39522e32A";
-    const PAYMENT_AMOUNT = "{{ $payment->amount }}";
-    const PAYMENT_ID = "{{ $payment->id }}";
-    const EXPIRES_AT = "{{ $payment->expires_at }}";
+        const TOKEN_ADDRESS =
+            "0xff9409141aDb261CAEB1dA1F9975B1F48057D360";
 
-    const ERC20_ABI = [
-        "function balanceOf(address) view returns (uint256)",
-        "function transfer(address to, uint256 amount) returns (bool)",
-        "function decimals() view returns (uint8)"
-    ];
+        const STORE_WALLET =
+            "0x923bFce1ac4D318441700f26Ad4ECaF39522e32A";
 
-    async function connectWallet() {
-        if (!window.ethereum) {
-    document.getElementById("status").innerText = "MetaMaskで開いてください";
+        const PAYMENT_ID = @json((string) $payment->id);
+        const PAYMENT_AMOUNT = @json((string) $payment->amount);
+        const PAYMENT_STATUS = @json((string) $payment->status);
+        const EXPIRES_AT = @json(
+            optional($payment->expires_at)->toIso8601String()
+        );
 
-    setTimeout(() => {
-        location.href = `http://metamask.app.link/dapp/${location.host}/pay/${PAYMENT_ID}`;
-    }, 1500);
-}
+        const SEPOLIA_CHAIN_ID = 11155111n;
 
-        const accounts = await ethereum.request({ method: 'eth_requestAccounts' });
-        return accounts[0];
-    }
+        let isPaying = false;
+        let connectedAddress = null;
+        let pollingTimer = null;
 
-    async function payWithERC20() {
+        const statusElement = document.getElementById("status");
+        const walletAddressElement =
+            document.getElementById("wallet-address");
 
-        if (isPaying) return;
-        isPaying = true;
+        const connectButton =
+            document.getElementById("connect-button");
 
-        const status = document.getElementById("status");
-        const button = document.getElementById("pay-button");
+        const payButton =
+            document.getElementById("pay-button");
 
-        // 期限チェック
-        if (EXPIRES_AT) {
-            const now = new Date();
-            const exp = new Date(EXPIRES_AT);
-            if (exp < now) {
-                alert("このQRは期限切れです");
-                isPaying = false;
-                return;
-            }
-        }
+        /*
+        |--------------------------------------------------------------------------
+        | 初期化
+        |--------------------------------------------------------------------------
+        */
 
-        try {
-            status.innerText = "ウォレット接続中...";
-            button.disabled = true;
+        initializePage();
 
-            const userAddress = await connectWallet();
-            if (!userAddress) throw new Error("ウォレット接続失敗");
-
-            const provider = new ethers.BrowserProvider(window.ethereum);
-
-            // ネットワークチェック（Sepolia）
-            const network = await provider.getNetwork();
-            if (network.chainId !== 11155111n) {
-                alert("Sepoliaに切り替えてください");
-                isPaying = false;
-                button.disabled = false;
+        function initializePage() {
+            if (PAYMENT_STATUS === "confirmed") {
+                showSuccess("この決済は完了しています");
+                disablePaymentButtons();
                 return;
             }
 
-            const signer = await provider.getSigner();
-            const tokenContract = new ethers.Contract(TOKEN_ADDRESS, ERC20_ABI, signer);
-
-            status.innerText = "金額計算中...";
-
-            const decimals = await tokenContract.decimals();
-            const amount = ethers.parseUnits(PAYMENT_AMOUNT.toString(), decimals);
-
-            // 残高チェック
-            const balance = await tokenContract.balanceOf(userAddress);
-            if (balance < amount) {
-                alert("残高不足です");
-                isPaying = false;
-                button.disabled = false;
+            if (isExpired()) {
+                showError("このQRコードは期限切れです");
+                disablePaymentButtons();
                 return;
             }
 
-            console.log("送金元:", userAddress);
-            console.log("送金先:", STORE_WALLET);
-
-            status.innerText = "送金承認待ち...";
-
-            const tx = await tokenContract.transfer(STORE_WALLET, amount);
-
-            status.innerText = "ブロック承認待ち...";
-
-            const receipt = await tx.wait();
-
-            status.innerText = "決済確認中...";
-
+            /*
+             * 支払い前にログイン状態を確認する。
+             *
+             * 送金後にtokenがないことへ気づくと、
+             * ブロックチェーン上では送金済みなのにDBがpendingになるため、
+             * 必ず送金より前に確認する。
+             */
             const userToken = localStorage.getItem("user_token");
 
             if (!userToken) {
-                alert("ログインが必要です");
-                location.href = "/user/login";
+                saveReturnPathAndRedirectToLogin();
                 return;
             }
 
-            const res = await fetch(`/api/payments/${PAYMENT_ID}/confirm`, {
-                method: "POST",
-                headers: {
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                    "Authorization": `Bearer ${userToken}`
-                },
-                body: JSON.stringify({
-                    tx_hash: tx.hash
-                })
+            startPolling();
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | ウォレット接続
+        |--------------------------------------------------------------------------
+        */
+
+        async function connectWallet() {
+            if (!window.ethereum) {
+                showError("MetaMaskでこのページを開いてください");
+
+                const dappUrl =
+                    `${location.host}${location.pathname}`;
+
+                setTimeout(() => {
+                    location.href =
+                        `https://metamask.app.link/dapp/${dappUrl}`;
+                }, 1200);
+
+                return null;
+            }
+
+            const accounts = await window.ethereum.request({
+                method: "eth_requestAccounts"
             });
 
-            const data = await res.json();
+            if (!accounts || accounts.length === 0) {
+                throw new Error("ウォレットアドレスを取得できませんでした");
+            }
 
-            if (data.success) {
-                status.innerText = "決済完了！";
-            } else {
-                status.innerText = "決済確認失敗";
-                button.disabled = false;
+            connectedAddress = accounts[0];
+
+            walletAddressElement.innerText =
+                `接続中：${shortenAddress(connectedAddress)}`;
+
+            showInfo("MetaMaskに接続しました");
+
+            return connectedAddress;
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | ERC20決済
+        |--------------------------------------------------------------------------
+        */
+
+        async function payWithERC20() {
+            if (isPaying) {
+                return;
+            }
+
+            /*
+             * 送金前にもう一度認証情報を確認する。
+             */
+            const userToken = localStorage.getItem("user_token");
+
+            if (!userToken) {
+                saveReturnPathAndRedirectToLogin();
+                return;
+            }
+
+            if (PAYMENT_STATUS === "confirmed") {
+                showSuccess("この決済はすでに完了しています");
+                disablePaymentButtons();
+                return;
+            }
+
+            if (isExpired()) {
+                showError("このQRコードは期限切れです");
+                disablePaymentButtons();
+                return;
+            }
+
+            isPaying = true;
+            payButton.disabled = true;
+            connectButton.disabled = true;
+
+            try {
+                showInfo("ウォレットに接続しています...");
+
+                const userAddress =
+                    connectedAddress ?? await connectWallet();
+
+                if (!userAddress) {
+                    throw new Error("ウォレット接続に失敗しました");
+                }
+
+                const provider =
+                    new ethers.BrowserProvider(window.ethereum);
+
+                const network = await provider.getNetwork();
+
+                if (network.chainId !== SEPOLIA_CHAIN_ID) {
+                    throw new Error(
+                        "MetaMaskのネットワークをSepoliaへ切り替えてください"
+                    );
+                }
+
+                const signer = await provider.getSigner();
+
+                const tokenContract = new ethers.Contract(
+                    TOKEN_ADDRESS,
+                    [
+                        "function balanceOf(address) view returns (uint256)",
+                        "function transfer(address to, uint256 amount) returns (bool)",
+                        "function decimals() view returns (uint8)"
+                    ],
+                    signer
+                );
+
+                showInfo("残高を確認しています...");
+
+                const decimals = await tokenContract.decimals();
+
+                const transferAmount = ethers.parseUnits(
+                    PAYMENT_AMOUNT,
+                    decimals
+                );
+
+                const balance =
+                    await tokenContract.balanceOf(userAddress);
+
+                if (balance < transferAmount) {
+                    throw new Error("JPYC残高が不足しています");
+                }
+
+                console.log("送金元:", userAddress);
+                console.log("送金先:", STORE_WALLET);
+                console.log("支払額:", PAYMENT_AMOUNT);
+
+                showInfo("MetaMaskで送金を承認してください...");
+
+                const transaction =
+                    await tokenContract.transfer(
+                        STORE_WALLET,
+                        transferAmount
+                    );
+
+                console.log(
+                    "Transaction hash:",
+                    transaction.hash
+                );
+
+                showInfo(
+                    "ブロックチェーンの承認を待っています..."
+                );
+
+                await transaction.wait();
+
+                showInfo("サーバーで決済を確認しています...");
+
+                await confirmPayment(
+                    transaction.hash,
+                    userToken
+                );
+
+                showSuccess("決済が完了しました");
+                disablePaymentButtons();
+
+                if (pollingTimer) {
+                    clearInterval(pollingTimer);
+                    pollingTimer = null;
+                }
+            } catch (error) {
+                console.error("Payment error:", error);
+
+                showError(
+                    error.message ||
+                    "決済処理中にエラーが発生しました"
+                );
+
+                payButton.disabled = false;
+                connectButton.disabled = false;
                 isPaying = false;
             }
-
-        } catch (err) {
-            console.error(err);
-            alert("決済失敗: " + err.message);
-            status.innerText = "エラーが発生しました";
-            button.disabled = false;
-            isPaying = false;
         }
-    }
 
-    document.getElementById("pay-button").addEventListener("click", payWithERC20);
+        /*
+        |--------------------------------------------------------------------------
+        | confirm API
+        |--------------------------------------------------------------------------
+        */
 
-    // ポーリング（3秒ごと）
-    setInterval(async () => {
-        try {
-            const res = await fetch(`/api/payments/${PAYMENT_ID}`);
-            const data = await res.json();
+        async function confirmPayment(txHash, userToken) {
+            const response = await fetch(
+                `/api/payments/${PAYMENT_ID}/confirm`,
+                {
+                    method: "POST",
+                    headers: {
+                        "Authorization": `Bearer ${userToken}`,
+                        "Accept": "application/json",
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({
+                        tx_hash: txHash
+                    })
+                }
+            );
 
-            if (data.status === 'confirmed') {
-                document.getElementById("status").innerText = "決済完了！";
-                document.getElementById("pay-button").disabled = true;
+            const data = await parseJsonResponse(response);
+
+            if (response.status === 401) {
+                clearUserSession();
+
+                sessionStorage.setItem(
+                    "redirect_after_login",
+                    location.pathname
+                );
+
+                throw new Error(
+                    "ログインの有効期限が切れています。ログインし直してください"
+                );
             }
-        } catch (e) {
-            console.log("polling error");
+
+            if (!response.ok) {
+                throw new Error(
+                    data.message ??
+                    data.error ??
+                    `決済確認に失敗しました（HTTP ${response.status}）`
+                );
+            }
+
+            if (!data.success) {
+                throw new Error(
+                    data.error ?? "決済確認に失敗しました"
+                );
+            }
+
+            return data;
         }
-    }, 3000);
 
+        /*
+        |--------------------------------------------------------------------------
+        | 決済状態ポーリング
+        |--------------------------------------------------------------------------
+        */
+
+        function startPolling() {
+            if (pollingTimer) {
+                clearInterval(pollingTimer);
+            }
+
+            pollingTimer = setInterval(
+                checkPaymentStatus,
+                3000
+            );
+        }
+
+        async function checkPaymentStatus() {
+            try {
+                const response = await fetch(
+                    `/api/payments/${PAYMENT_ID}`,
+                    {
+                        headers: {
+                            "Accept": "application/json"
+                        }
+                    }
+                );
+
+                const data =
+                    await parseJsonResponse(response);
+
+                if (!response.ok) {
+                    console.error(
+                        "Payment status error:",
+                        data
+                    );
+                    return;
+                }
+
+                if (data.status === "confirmed") {
+                    showSuccess("決済が完了しました");
+                    disablePaymentButtons();
+
+                    clearInterval(pollingTimer);
+                    pollingTimer = null;
+                    return;
+                }
+
+                if (data.status === "failed") {
+                    showError("決済に失敗しました");
+                    disablePaymentButtons();
+
+                    clearInterval(pollingTimer);
+                    pollingTimer = null;
+                    return;
+                }
+
+                if (isExpired()) {
+                    showError("このQRコードは期限切れです");
+                    disablePaymentButtons();
+
+                    clearInterval(pollingTimer);
+                    pollingTimer = null;
+                }
+            } catch (error) {
+                console.error("Polling error:", error);
+            }
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | レスポンス処理
+        |--------------------------------------------------------------------------
+        */
+
+        async function parseJsonResponse(response) {
+            const responseText = await response.text();
+
+            try {
+                return JSON.parse(responseText);
+            } catch (error) {
+                console.error(
+                    "Non-JSON response:",
+                    responseText
+                );
+
+                throw new Error(
+                    `サーバーがJSONを返しませんでした（HTTP ${response.status}）`
+                );
+            }
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | 共通処理
+        |--------------------------------------------------------------------------
+        */
+
+        function isExpired() {
+            if (!EXPIRES_AT) {
+                return false;
+            }
+
+            return new Date(EXPIRES_AT).getTime() <
+                Date.now();
+        }
+
+        function saveReturnPathAndRedirectToLogin() {
+            sessionStorage.setItem(
+                "redirect_after_login",
+                location.pathname
+            );
+
+            alert("支払いを行うにはログインが必要です");
+
+            location.href = "/user/login";
+        }
+
+        function clearUserSession() {
+            localStorage.removeItem("user_token");
+            localStorage.removeItem("user_name");
+            localStorage.removeItem("user_id");
+        }
+
+        function disablePaymentButtons() {
+            payButton.disabled = true;
+            connectButton.disabled = true;
+        }
+
+        function shortenAddress(address) {
+            if (!address || address.length < 12) {
+                return address ?? "";
+            }
+
+            return `${address.slice(0, 6)}...${address.slice(-4)}`;
+        }
+
+        function showInfo(message) {
+            statusElement.className = "status-info";
+            statusElement.innerText = message;
+        }
+
+        function showSuccess(message) {
+            statusElement.className = "status-success";
+            statusElement.innerText = message;
+        }
+
+        function showError(message) {
+            statusElement.className = "status-error";
+            statusElement.innerText = message;
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | イベント登録
+        |--------------------------------------------------------------------------
+        */
+
+        connectButton.addEventListener(
+            "click",
+            async () => {
+                try {
+                    connectButton.disabled = true;
+
+                    await connectWallet();
+                } catch (error) {
+                    console.error(error);
+                    showError(
+                        error.message ??
+                        "ウォレット接続に失敗しました"
+                    );
+                } finally {
+                    if (PAYMENT_STATUS !== "confirmed") {
+                        connectButton.disabled = false;
+                    }
+                }
+            }
+        );
+
+        payButton.addEventListener(
+            "click",
+            payWithERC20
+        );
+
+        window.addEventListener("beforeunload", () => {
+            if (pollingTimer) {
+                clearInterval(pollingTimer);
+            }
+        });
     </script>
-
 </body>
 </html>
