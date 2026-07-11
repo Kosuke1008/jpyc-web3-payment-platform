@@ -51,15 +51,33 @@ class PaymentController extends Controller
         // ④ receipt取得
         $receipt = null;
 
+        $rpcUrl = config('services.web3.rpc_url');
+        $contractAddress = config('services.web3.erc20_contract_address');
+
+        if (!$rpcUrl) {
+            return response()->json([
+                'error' => 'WEB3 RPC URL is not configured'
+            ], 500);
+        }
+
+        if (!$contractAddress) {
+            return response()->json([
+                'error' => 'ERC20 contract address is not configured'
+            ], 500);
+        }
+        
+
         for ($i = 0; $i < 10; $i++) {
             $response = Http::timeout(30)
-                ->withHeaders(['Content-Type' => 'application/json'])
+                ->withHeaders([
+                    'Content-Type' => 'application/json'
+                ])
                 ->withOptions([
                     'curl' => [
                         CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4,
                     ]
                 ])
-                ->post(env('WEB3_RPC_URL'), [
+                ->post($rpcUrl, [
                     'jsonrpc' => '2.0',
                     'method' => 'eth_getTransactionReceipt',
                     'params' => [$txHash],
@@ -91,31 +109,39 @@ class PaymentController extends Controller
 
         foreach ($receipt['logs'] as $log) {
 
-            // コントラクトチェック
-            if (strtolower($log['address']) !== strtolower(env('ERC20_CONTRACT_ADDRESS'))) {
+            if (
+                strtolower($log['address']) !==
+                strtolower($contractAddress)
+            ) {
                 continue;
             }
 
-            // Transferイベントチェック
-            if (strtolower($log['topics'][0]) !== $transferTopic) {
+            if (
+                empty($log['topics'][0]) ||
+                strtolower($log['topics'][0]) !== $transferTopic
+            ) {
                 continue;
             }
 
-            // toアドレス取得
+            if (empty($log['topics'][2])) {
+                continue;
+            }
+
             $to = '0x' . substr(strtolower($log['topics'][2]), 26);
 
-            // amount取得（16進数 → 10進数）
             $amount = gmp_strval(gmp_init($log['data'], 16));
 
-            // 店舗ウォレット
-            $storeWallet = strtolower(DB::table('wallets')
-                ->where('store_id', $payment->store_id)
-                ->value('address'));
+            $storeWallet = strtolower(
+                DB::table('wallets')
+                    ->where('store_id', $payment->store_id)
+                    ->value('address')
+            );
 
-            // expected amount（decimal対応）
-            $expected = bcmul((string)$payment->amount, bcpow('10', '18'));
+            $expected = bcmul(
+                (string) $payment->amount,
+                bcpow('10', '18')
+            );
 
-            // 検証
             if (
                 $to === $storeWallet &&
                 bccomp($amount, $expected) === 0

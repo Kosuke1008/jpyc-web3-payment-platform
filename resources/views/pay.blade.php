@@ -199,6 +199,7 @@
         );
 
         const SEPOLIA_CHAIN_ID = 11155111n;
+        const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
 
         let isPaying = false;
         let connectedAddress = null;
@@ -252,6 +253,113 @@
             startPolling();
         }
 
+        //
+
+        function openInMetaMask() {
+            const dappUrl =
+                window.location.host +
+                window.location.pathname +
+                window.location.search;
+
+            const metaMaskDeepLink =
+                `https://link.metamask.io/dapp/${dappUrl}`;
+
+            window.location.href = metaMaskDeepLink;
+        }
+
+        async function ensureSepoliaNetwork() {
+            if (!window.ethereum) {
+                throw new Error(
+                    "MetaMaskが見つかりません。MetaMaskアプリ内ブラウザで開いてください。"
+                );
+            }
+
+            const currentChainId = await window.ethereum.request({
+                method: "eth_chainId"
+            });
+
+            console.log("現在のchainId:", currentChainId);
+
+            if (currentChainId.toLowerCase() === SEPOLIA_CHAIN_ID_HEX) {
+                return;
+            }
+
+            try {
+                await window.ethereum.request({
+                    method: "wallet_switchEthereumChain",
+                    params: [
+                        {
+                            chainId: SEPOLIA_CHAIN_ID_HEX
+                        }
+                    ]
+                });
+            } catch (error) {
+                console.error("Sepolia切り替えエラー:", error);
+
+                // 4902は「MetaMaskにネットワークが登録されていない」
+                if (error.code === 4902) {
+                    await window.ethereum.request({
+                        method: "wallet_addEthereumChain",
+                        params: [
+                            {
+                                chainId: SEPOLIA_CHAIN_ID_HEX,
+                                chainName: "Ethereum Sepolia",
+                                nativeCurrency: {
+                                    name: "Sepolia ETH",
+                                    symbol: "ETH",
+                                    decimals: 18
+                                },
+                                rpcUrls: [
+                                    "https://ethereum-sepolia-rpc.publicnode.com"
+                                ],
+                                blockExplorerUrls: [
+                                    "https://sepolia.etherscan.io"
+                                ]
+                            }
+                        ]
+                    });
+const chainId = await window.ethereum.request({
+    method: "eth_chainId"
+});
+
+console.log("chainId =", chainId);
+
+statusElement.textContent = chainId;
+                    await window.ethereum.request({
+                        method: "wallet_switchEthereumChain",
+                        params: [
+                            {
+                                chainId: SEPOLIA_CHAIN_ID_HEX
+                            }
+                        ]
+                    });
+
+                    return;
+                }
+
+                if (error.code === 4001) {
+                    throw new Error(
+                        "Sepoliaへの切り替えがキャンセルされました。"
+                    );
+                }
+
+                throw new Error(
+                    "Sepoliaへの切り替えに失敗しました。MetaMaskで切り替えを承認してください。"
+                );
+            }
+
+            // 実際に切り替わったか再確認
+            const switchedChainId = await window.ethereum.request({
+                method: "eth_chainId"
+            });
+
+            if (switchedChainId.toLowerCase() !== SEPOLIA_CHAIN_ID_HEX) {
+                throw new Error(
+                    `ネットワークがSepoliaではありません。現在: ${switchedChainId}`
+                );
+            }
+        }
+
         /*
         |--------------------------------------------------------------------------
         | ウォレット接続
@@ -259,37 +367,64 @@
         */
 
         async function connectWallet() {
-            if (!window.ethereum) {
-                showError("MetaMaskでこのページを開いてください");
+            try {
+                if (!window.ethereum) {
+                    showInfo("MetaMaskアプリを開いています...");
+                    openInMetaMask();
+                    return null;
+                }
 
-                const dappUrl =
-                    `${location.host}${location.pathname}`;
+                statusElement.textContent =
+                    "MetaMaskに接続しています...";
 
-                setTimeout(() => {
-                    location.href =
-                        `https://metamask.app.link/dapp/${dappUrl}`;
-                }, 1200);
+                await ensureSepoliaNetwork();
 
-                return null;
+                const accounts = await window.ethereum.request({
+                    method: "eth_requestAccounts"
+                });
+
+                if (!accounts || accounts.length === 0) {
+                    throw new Error(
+                        "接続可能なアカウントがありません。"
+                    );
+                }
+
+                const provider =
+                    new ethers.BrowserProvider(window.ethereum);
+
+                const network = await provider.getNetwork();
+
+                if (network.chainId !== SEPOLIA_CHAIN_ID) {
+                    throw new Error(
+                        `Sepoliaへの接続を確認できませんでした。chainId: ${network.chainId}`
+                    );
+                }
+
+                const signer = await provider.getSigner();
+                connectedAddress = await signer.getAddress();
+
+                walletAddressElement.textContent =
+                    `接続中：${shortenAddress(connectedAddress)}`;
+
+                showSuccess("Sepoliaに接続しました");
+
+                return {
+                    provider,
+                    signer,
+                    address: connectedAddress
+                };
+            } catch (error) {
+                console.error("ウォレット接続エラー:", error);
+
+                showError(
+                    error.message ||
+                    "MetaMaskへの接続に失敗しました。"
+                );
+
+                throw error;
             }
-
-            const accounts = await window.ethereum.request({
-                method: "eth_requestAccounts"
-            });
-
-            if (!accounts || accounts.length === 0) {
-                throw new Error("ウォレットアドレスを取得できませんでした");
-            }
-
-            connectedAddress = accounts[0];
-
-            walletAddressElement.innerText =
-                `接続中：${shortenAddress(connectedAddress)}`;
-
-            showInfo("MetaMaskに接続しました");
-
-            return connectedAddress;
         }
+
 
         /*
         |--------------------------------------------------------------------------
@@ -302,9 +437,12 @@
                 return;
             }
 
-            /*
-             * 送金前にもう一度認証情報を確認する。
-             */
+            if (!window.ethereum) {
+                showInfo("MetaMaskアプリを開いています...");
+                openInMetaMask();
+                return;
+            }
+
             const userToken = localStorage.getItem("user_token");
 
             if (!userToken) {
@@ -331,12 +469,7 @@
             try {
                 showInfo("ウォレットに接続しています...");
 
-                const userAddress =
-                    connectedAddress ?? await connectWallet();
-
-                if (!userAddress) {
-                    throw new Error("ウォレット接続に失敗しました");
-                }
+                await ensureSepoliaNetwork();
 
                 const provider =
                     new ethers.BrowserProvider(window.ethereum);
@@ -350,6 +483,12 @@
                 }
 
                 const signer = await provider.getSigner();
+                const userAddress = await signer.getAddress();
+
+                connectedAddress = userAddress;
+
+                walletAddressElement.textContent =
+                    `接続中：${shortenAddress(userAddress)}`;
 
                 const tokenContract = new ethers.Contract(
                     TOKEN_ADDRESS,
@@ -377,8 +516,8 @@
                     throw new Error("JPYC残高が不足しています");
                 }
 
-                console.log("送金元:", userAddress);
-                console.log("送金先:", STORE_WALLET);
+                console.log("送信元:", userAddress);
+                console.log("送信先:", STORE_WALLET);
                 console.log("支払額:", PAYMENT_AMOUNT);
 
                 showInfo("MetaMaskで送金を承認してください...");
@@ -418,12 +557,15 @@
                 console.error("Payment error:", error);
 
                 showError(
+                    error.shortMessage ||
+                    error.reason ||
                     error.message ||
                     "決済処理中にエラーが発生しました"
                 );
 
                 payButton.disabled = false;
                 connectButton.disabled = false;
+            } finally {
                 isPaying = false;
             }
         }

@@ -14,6 +14,7 @@ return [
     |
     */
 
+
     'postmark' => [
         'key' => env('POSTMARK_API_KEY'),
     ],
@@ -36,7 +37,8 @@ return [
     ],
 
     'web3' => [
-        'rpc_url' => env('WEB3_RPC_URL'),
+        'rpc_url' => env('ALCHEMY_RPC_URL'),
+        'erc20_contract_address' => env('ERC20_CONTRACT_ADDRESS'),
     ],
 
 ];
