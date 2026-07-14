@@ -149,6 +149,11 @@
             <button id="connect-button" type="button">
                 MetaMaskを接続
             </button>
+            
+            <p>
+                <small>
+                    ※ 支払うボタンを押してMetaMak起動後、もう一度支払うボタンを押してください。
+                </small>
 
             <button id="pay-button" type="button">
                 {{ number_format($payment->amount) }} JPYCを支払う
@@ -171,9 +176,37 @@
         </section>
     </main>
 
+    <script>
+        window.LIVT_CONFIG = {
+            network: @json(config('services.web3.network')),
+            chainId: @json((string) config('services.web3.chain_id')),
+            chainName: @json(config('services.web3.chain_name')),
+            rpcUrl: @json(config('services.web3.rpc_url')),
+            currencyName: @json(config('services.web3.currency_name')),
+            currencySymbol: @json(config('services.web3.currency_symbol')),
+            explorerUrl: @json(config('services.web3.block_explorer_url')),
+            tokenAddress: @json(config('services.web3.erc20_contract_address'))
+        };
+    </script>
+
     <script type="module">
         import { ethers } from
             "https://unpkg.com/ethers@6.9.2/dist/ethers.min.js";
+
+        const {
+            network: TARGET_NETWORK,
+            chainId,
+            chainName: TARGET_CHAIN_NAME,
+            rpcUrl: TARGET_RPC_URL,
+            currencyName: TARGET_CURRENCY_NAME,
+            currencySymbol: TARGET_CURRENCY_SYMBOL,
+            explorerUrl: TARGET_EXPLORER_URL,
+            tokenAddress: TOKEN_ADDRESS
+        } = window.LIVT_CONFIG;
+
+        const TARGET_CHAIN_ID = BigInt(chainId);
+        const TARGET_CHAIN_ID_HEX =
+            "0x" + TARGET_CHAIN_ID.toString(16);
 
         /*
         |--------------------------------------------------------------------------
@@ -185,9 +218,6 @@
         |
         */
 
-        const TOKEN_ADDRESS =
-            "0xff9409141aDb261CAEB1dA1F9975B1F48057D360";
-
         const STORE_WALLET =
             "0x923bFce1ac4D318441700f26Ad4ECaF39522e32A";
 
@@ -197,9 +227,6 @@
         const EXPIRES_AT = @json(
             optional($payment->expires_at)->toIso8601String()
         );
-
-        const SEPOLIA_CHAIN_ID = 11155111n;
-        const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
 
         let isPaying = false;
         let connectedAddress = null;
@@ -280,7 +307,7 @@
 
             console.log("現在のchainId:", currentChainId);
 
-            if (currentChainId.toLowerCase() === SEPOLIA_CHAIN_ID_HEX) {
+            if (currentChainId.toLowerCase() === TARGET_CHAIN_ID_HEX) {
                 return;
             }
 
@@ -289,12 +316,12 @@
                     method: "wallet_switchEthereumChain",
                     params: [
                         {
-                            chainId: SEPOLIA_CHAIN_ID_HEX
+                            chainId: TARGET_CHAIN_ID_HEX
                         }
                     ]
                 });
             } catch (error) {
-                console.error("Sepolia切り替えエラー:", error);
+                console.error(`${TARGET_CHAIN_NAME}切り替えエラー:`, error);
 
                 // 4902は「MetaMaskにネットワークが登録されていない」
                 if (error.code === 4902) {
@@ -302,18 +329,18 @@
                         method: "wallet_addEthereumChain",
                         params: [
                             {
-                                chainId: SEPOLIA_CHAIN_ID_HEX,
-                                chainName: "Ethereum Sepolia",
+                                chainId: TARGET_CHAIN_ID_HEX,
+                                chainName: TARGET_CHAIN_NAME,
                                 nativeCurrency: {
-                                    name: "Sepolia ETH",
-                                    symbol: "ETH",
+                                    name: TARGET_CURRENCY_NAME,
+                                    symbol: TARGET_CURRENCY_SYMBOL,
                                     decimals: 18
                                 },
                                 rpcUrls: [
-                                    "https://ethereum-sepolia-rpc.publicnode.com"
+                                    TARGET_RPC_URL
                                 ],
                                 blockExplorerUrls: [
-                                    "https://sepolia.etherscan.io"
+                                    TARGET_EXPLORER_URL
                                 ]
                             }
                         ]
@@ -329,7 +356,7 @@ statusElement.textContent = chainId;
                         method: "wallet_switchEthereumChain",
                         params: [
                             {
-                                chainId: SEPOLIA_CHAIN_ID_HEX
+                                chainId: TARGET_CHAIN_ID_HEX
                             }
                         ]
                     });
@@ -339,12 +366,12 @@ statusElement.textContent = chainId;
 
                 if (error.code === 4001) {
                     throw new Error(
-                        "Sepoliaへの切り替えがキャンセルされました。"
+                        ` ${TARGET_CHAIN_NAME}への切り替えがキャンセルされました。`
                     );
                 }
 
                 throw new Error(
-                    "Sepoliaへの切り替えに失敗しました。MetaMaskで切り替えを承認してください。"
+                    `${TARGET_CHAIN_NAME}への切り替えに失敗しました。MetaMaskで切り替えを承認してください。`
                 );
             }
 
@@ -353,9 +380,9 @@ statusElement.textContent = chainId;
                 method: "eth_chainId"
             });
 
-            if (switchedChainId.toLowerCase() !== SEPOLIA_CHAIN_ID_HEX) {
+            if (switchedChainId.toLowerCase() !== TARGET_CHAIN_ID_HEX) {
                 throw new Error(
-                    `ネットワークがSepoliaではありません。現在: ${switchedChainId}`
+                    `ネットワークが${TARGET_CHAIN_NAME}ではありません。現在: ${switchedChainId}`
                 );
             }
         }
@@ -394,9 +421,9 @@ statusElement.textContent = chainId;
 
                 const network = await provider.getNetwork();
 
-                if (network.chainId !== SEPOLIA_CHAIN_ID) {
+                if (network.chainId !== TARGET_CHAIN_ID) {
                     throw new Error(
-                        `Sepoliaへの接続を確認できませんでした。chainId: ${network.chainId}`
+                        `${TARGET_CHAIN_NAME}への接続を確認できませんでした。chainId: ${network.chainId}`
                     );
                 }
 
@@ -406,7 +433,7 @@ statusElement.textContent = chainId;
                 walletAddressElement.textContent =
                     `接続中：${shortenAddress(connectedAddress)}`;
 
-                showSuccess("Sepoliaに接続しました");
+                showSuccess(`${TARGET_CHAIN_NAME}に接続しました`);
 
                 return {
                     provider,
@@ -476,9 +503,9 @@ statusElement.textContent = chainId;
 
                 const network = await provider.getNetwork();
 
-                if (network.chainId !== SEPOLIA_CHAIN_ID) {
+                if (network.chainId !== TARGET_CHAIN_ID) {
                     throw new Error(
-                        "MetaMaskのネットワークをSepoliaへ切り替えてください"
+                        `MetaMaskのネットワークを${TARGET_CHAIN_NAME}へ切り替えてください`
                     );
                 }
 

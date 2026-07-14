@@ -37,8 +37,35 @@ return [
     ],
 
     'web3' => [
-        'rpc_url' => env('ALCHEMY_RPC_URL'),
-        'erc20_contract_address' => env('ERC20_CONTRACT_ADDRESS'),
+        'network' => env('WEB3_NETWORK', 'sepolia'),
+
+        'rpc_url' => env('WEB3_NETWORK', 'sepolia') === 'kairos'
+            ? env('KAIROS_RPC_URL')
+            : env('ALCHEMY_RPC_URL'),
+
+        'erc20_contract_address' => env('WEB3_NETWORK', 'sepolia') === 'kairos'
+            ? env('KAIROS_ERC20_CONTRACT_ADDRESS')
+            : env('ERC20_CONTRACT_ADDRESS'),
+
+        'chain_id' => env('WEB3_NETWORK', 'sepolia') === 'kairos'
+            ? 1001
+            : 11155111,
+
+        'chain_name' => env('WEB3_NETWORK', 'sepolia') === 'kairos'
+            ? 'Kaia Kairos Testnet'
+            : 'Ethereum Sepolia',
+
+        'currency_name' => env('WEB3_NETWORK', 'sepolia') === 'kairos'
+            ? 'KAIA'
+            : 'Sepolia ETH',
+
+        'currency_symbol' => env('WEB3_NETWORK', 'sepolia') === 'kairos'
+            ? 'KAIA'
+            : 'ETH',
+
+        'block_explorer_url' => env('WEB3_NETWORK', 'sepolia') === 'kairos'
+            ? 'https://kairos.kaiascan.io'
+            : 'https://sepolia.etherscan.io',
     ],
 
 ];
