@@ -9,7 +9,7 @@ return new class extends Migration {
     {
         Schema::table('payments', function (Blueprint $table) {
             $table->timestamp('expires_at')->nullable()->after('paid_at');
-            $table->string('tx_hash')->nullable()->unique()->change();
+            $table->string('tx_hash')->nullable()->unique();
         });
     }
 
