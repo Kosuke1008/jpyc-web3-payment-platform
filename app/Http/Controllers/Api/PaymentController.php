@@ -2,178 +2,77 @@
 
 namespace App\Http\Controllers\Api;
 
-use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
-use Carbon\Carbon;
 use App\Http\Controllers\Controller;
 use App\Models\Payment;
+use App\Services\Payments\PaymentTransactionVerifier;
+use App\Services\Payments\PaymentVerificationException;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use SimpleSoftwareIO\QrCode\Facades\QrCode;
-use Illuminate\Support\Facades\Http;
 
 class PaymentController extends Controller
 {
-    public function confirm($id, Request $request)
-    {
-
-        if (!$request->user()) {
+    public function confirm(
+        $id,
+        Request $request,
+        PaymentTransactionVerifier $verifier
+    ): JsonResponse {
+        if (! $request->user()) {
             return response()->json([
-                'error' => 'Unauthenticated user'
+                'error' => 'Unauthenticated user',
             ], 401);
         }
 
-        // ① バリデーション
-        $request->validate([
-            'tx_hash' => 'required|string|size:66'
+        $validated = $request->validate([
+            'tx_hash' => [
+                'required',
+                'string',
+                'regex:/\A0x[0-9a-fA-F]{64}\z/',
+            ],
         ]);
 
-        $txHash = strtolower($request->tx_hash);
-
-        // ② payment取得
-        $payment = DB::table('payments')->where('id', $id)->first();
-
-        if (!$payment) {
-            return response()->json(['error' => 'Payment not found'], 404);
-        }
-
-        if ($payment->status === 'confirmed') {
-            return response()->json(['error' => 'Already paid'], 400);
-        }
-
-        if ($payment->expires_at && now()->gt($payment->expires_at)) {
-            return response()->json(['error' => 'Expired'], 400);
-        }
-
-        // ③ tx_hash重複チェック（リプレイ攻撃対策）
-        if (DB::table('payments')->where('tx_hash', $txHash)->exists()) {
-            return response()->json(['error' => 'Duplicate tx_hash'], 400);
-        }
-
-        // ④ receipt取得
-        $receipt = null;
-
-        $rpcUrl = config('services.web3.rpc_url');
-        $contractAddress = config('services.web3.erc20_contract_address');
-
-        if (!$rpcUrl) {
-            return response()->json([
-                'error' => 'WEB3 RPC URL is not configured'
-            ], 500);
-        }
-
-        if (!$contractAddress) {
-            return response()->json([
-                'error' => 'ERC20 contract address is not configured'
-            ], 500);
-        }
-        
-
-        for ($i = 0; $i < 10; $i++) {
-            $response = Http::timeout(30)
-                ->withHeaders([
-                    'Content-Type' => 'application/json'
-                ])
-                ->withOptions([
-                    'curl' => [
-                        CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4,
-                    ]
-                ])
-                ->post($rpcUrl, [
-                    'jsonrpc' => '2.0',
-                    'method' => 'eth_getTransactionReceipt',
-                    'params' => [$txHash],
-                    'id' => 1
-                ]);
-
-            $data = $response->json();
-
-            if (!empty($data['result'])) {
-                $receipt = $data['result'];
-                break;
-            }
-
-            usleep(500000); // 0.5秒
-        }
-
-        if (!$receipt) {
-            return response()->json(['error' => 'Transaction not found'], 400);
-        }
-
-        // ⑤ トランザクション成功確認
-        if (!isset($receipt['status']) || $receipt['status'] !== '0x1') {
-            return response()->json(['error' => 'Transaction failed'], 400);
-        }
-
-        // ⑥ Transferイベント検証
-        $transferTopic = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
-        $valid = false;
-
-        foreach ($receipt['logs'] as $log) {
-
-            if (
-                strtolower($log['address']) !==
-                strtolower($contractAddress)
-            ) {
-                continue;
-            }
-
-            if (
-                empty($log['topics'][0]) ||
-                strtolower($log['topics'][0]) !== $transferTopic
-            ) {
-                continue;
-            }
-
-            if (empty($log['topics'][2])) {
-                continue;
-            }
-
-            $to = '0x' . substr(strtolower($log['topics'][2]), 26);
-
-            $amount = gmp_strval(gmp_init($log['data'], 16));
-
-            $storeWallet = strtolower(
-                DB::table('wallets')
-                    ->where('store_id', $payment->store_id)
-                    ->value('address')
+        try {
+            $verifier->verifyAndConfirm(
+                $id,
+                $validated['tx_hash'],
+                $request->user()->id
             );
-
-            $expected = bcmul(
-                (string) $payment->amount,
-                bcpow('10', '18')
-            );
-
-            if (
-                $to === $storeWallet &&
-                bccomp($amount, $expected) === 0
-            ) {
-                $valid = true;
-                break;
-            }
+        } catch (PaymentVerificationException $exception) {
+            return $this->paymentVerificationError($exception);
         }
-
-        if (!$valid) {
-            return response()->json(['error' => 'Invalid transaction'], 400);
-        }
-
-        // ⑦ DB更新
-        DB::table('payments')
-            ->where('id', $id)
-            ->update([
-                'status' => 'confirmed',
-                'tx_hash' => $txHash,
-                'paid_at' => now(),
-                'user_id' => $request->user()->id,
-            ]);
 
         return response()->json(['success' => true]);
+    }
+
+    private function paymentVerificationError(
+        PaymentVerificationException $exception
+    ): JsonResponse {
+        [$message, $status] = match ($exception->reason) {
+            PaymentVerificationException::PAYMENT_NOT_FOUND => ['Payment not found', 404],
+            PaymentVerificationException::PAYMENT_ALREADY_CONFIRMED => ['Already paid', 400],
+            PaymentVerificationException::PAYMENT_NOT_PENDING => ['Payment not pending', 400],
+            PaymentVerificationException::PAYMENT_EXPIRED => ['Expired', 400],
+            PaymentVerificationException::DUPLICATE_TRANSACTION_HASH => ['Duplicate tx_hash', 400],
+            PaymentVerificationException::RPC_URL_NOT_CONFIGURED => ['WEB3 RPC URL is not configured', 500],
+            PaymentVerificationException::TOKEN_CONTRACT_NOT_CONFIGURED => ['ERC20 contract address is not configured', 500],
+            PaymentVerificationException::CHAIN_ID_NOT_CONFIGURED => ['WEB3 chain ID is not configured', 500],
+            PaymentVerificationException::INVALID_CHAIN_ID_RESPONSE => ['Invalid WEB3 chain ID response', 500],
+            PaymentVerificationException::CHAIN_ID_MISMATCH => ['WEB3 RPC chain mismatch', 500],
+            PaymentVerificationException::TRANSACTION_NOT_FOUND => ['Transaction not found', 400],
+            PaymentVerificationException::TRANSACTION_FAILED => ['Transaction failed', 400],
+            PaymentVerificationException::INVALID_TRANSACTION,
+            PaymentVerificationException::INVALID_TRANSACTION_HASH => ['Invalid transaction', 400],
+            default => ['Payment confirmation failed', 500],
+        };
+
+        return response()->json(['error' => $message], $status);
     }
 
     public function create(Request $request)
     {
         $request->validate([
-            'amount' => 'required|numeric|min:1|max:100000'
+            'amount' => 'required|numeric|min:1|max:100000',
         ]);
-
 
         $staff = $request->user();
 
@@ -185,15 +84,16 @@ class PaymentController extends Controller
             'staff_id' => $staffId,
             'amount' => $request->amount,
             'status' => 'pending',
-            'expires_at' => now()->addMinutes(10)
+            'expires_at' => now()->addMinutes(10),
         ]);
 
-        $payUrl = config('app.url') . "/pay/" . $payment->id;
+        $payUrl = config('app.url').'/pay/'.$payment->id;
 
         try {
             $qr = (string) QrCode::format('svg')->size(300)->generate($payUrl);
         } catch (\Exception $e) {
             \Log::error('QR ERROR', ['error' => $e->getMessage()]);
+
             return response()->json(['error' => 'QR generation failed'], 500);
         }
 
@@ -201,7 +101,7 @@ class PaymentController extends Controller
             'payment_id' => $payment->id,
             'amount' => $payment->amount,
             'pay_url' => $payUrl,
-            'qr_code' => $qr
+            'qr_code' => $qr,
         ]);
     }
 
@@ -214,7 +114,7 @@ class PaymentController extends Controller
             'amount' => $payment->amount,
             'status' => $payment->status,
             'store_name' => $payment->store->name ?? 'Store',
-            'expires_at' => $payment->expires_at
+            'expires_at' => $payment->expires_at,
         ]);
     }
 
@@ -222,14 +122,14 @@ class PaymentController extends Controller
     {
         $payment = Payment::find($id);
 
-        if (!$payment) {
+        if (! $payment) {
             return response()->json([
-                'error' => 'Not found'
+                'error' => 'Not found',
             ], 404);
         }
 
         return response()->json([
-            'status' => $payment->status
+            'status' => $payment->status,
         ]);
     }
 }
