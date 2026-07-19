@@ -7,6 +7,7 @@ use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use JsonException;
 use Throwable;
 
 class PaymentTransactionVerifier
@@ -188,22 +189,9 @@ class PaymentTransactionVerifier
             );
         }
 
-        try {
-            $response = $this->rpcRequest($rpcUrl, 'eth_chainId');
-            $data = $response->json();
-        } catch (ConnectionException) {
-            throw new PaymentVerificationException(
-                PaymentVerificationException::INVALID_CHAIN_ID_RESPONSE
-            );
-        }
-
-        if (! is_array($data) || ! array_key_exists('result', $data)) {
-            throw new PaymentVerificationException(
-                PaymentVerificationException::INVALID_CHAIN_ID_RESPONSE
-            );
-        }
-
-        $actualChainId = $this->normalizeChainId($data['result']);
+        $actualChainId = $this->normalizeChainId(
+            $this->rpcResult($rpcUrl, 'eth_chainId')
+        );
 
         if ($actualChainId === null) {
             throw new PaymentVerificationException(
@@ -251,24 +239,14 @@ class PaymentTransactionVerifier
         string $rpcUrl,
         string $transactionHash
     ): array {
-        $receipt = null;
-
         for ($attempt = 0; $attempt < self::RECEIPT_ATTEMPTS; $attempt++) {
-            try {
-                $response = $this->rpcRequest(
-                    $rpcUrl,
-                    'eth_getTransactionReceipt',
-                    [$transactionHash]
-                );
-                $data = $response->json();
-            } catch (ConnectionException) {
-                $data = null;
-            }
+            $receipt = $this->rpcResult(
+                $rpcUrl,
+                'eth_getTransactionReceipt',
+                [$transactionHash]
+            );
 
-            if (is_array($data)
-                && array_key_exists('result', $data)
-                && $data['result'] !== null) {
-                $receipt = $data['result'];
+            if ($receipt !== null) {
                 break;
             }
 
@@ -302,6 +280,79 @@ class PaymentTransactionVerifier
         }
 
         return $receipt;
+    }
+
+    private function rpcResult(
+        string $rpcUrl,
+        string $method,
+        array $parameters = []
+    ): mixed {
+        try {
+            $response = $this->rpcRequest($rpcUrl, $method, $parameters);
+        } catch (ConnectionException $exception) {
+            throw new PaymentVerificationException(
+                PaymentVerificationException::RPC_TRANSPORT_FAILURE,
+                rpcMethod: $method,
+                previous: $exception
+            );
+        }
+
+        if (! $response->successful()) {
+            throw new PaymentVerificationException(
+                PaymentVerificationException::RPC_TRANSPORT_FAILURE,
+                rpcMethod: $method,
+                upstreamStatus: $response->status()
+            );
+        }
+
+        $body = $response->body();
+
+        if (trim($body) === '') {
+            throw new PaymentVerificationException(
+                PaymentVerificationException::MALFORMED_RPC_RESPONSE,
+                rpcMethod: $method
+            );
+        }
+
+        try {
+            $data = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
+        } catch (JsonException $exception) {
+            throw new PaymentVerificationException(
+                PaymentVerificationException::MALFORMED_RPC_RESPONSE,
+                rpcMethod: $method,
+                previous: $exception
+            );
+        }
+
+        if (! is_array($data)) {
+            throw new PaymentVerificationException(
+                PaymentVerificationException::MALFORMED_RPC_RESPONSE,
+                rpcMethod: $method
+            );
+        }
+
+        if (array_key_exists('error', $data) && $data['error'] !== null) {
+            $providerCode = is_array($data['error'])
+                && array_key_exists('code', $data['error'])
+                && is_int($data['error']['code'])
+                    ? $data['error']['code']
+                    : null;
+
+            throw new PaymentVerificationException(
+                PaymentVerificationException::JSON_RPC_PROVIDER_ERROR,
+                rpcMethod: $method,
+                providerCode: $providerCode
+            );
+        }
+
+        if (! array_key_exists('result', $data)) {
+            throw new PaymentVerificationException(
+                PaymentVerificationException::MALFORMED_RPC_RESPONSE,
+                rpcMethod: $method
+            );
+        }
+
+        return $data['result'];
     }
 
     private function rpcRequest(

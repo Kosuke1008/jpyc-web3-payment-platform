@@ -99,6 +99,24 @@
             background: #e0e7ff;
         }
 
+        .wallet-launch-button {
+            display: block;
+            width: 100%;
+            min-height: 52px;
+            margin-top: 12px;
+            padding: 14px 20px;
+            border-radius: 12px;
+            background: #111827;
+            color: #ffffff;
+            font-size: 17px;
+            font-weight: 600;
+            text-decoration: none;
+        }
+
+        .wallet-launch-button:hover {
+            background: #1f2937;
+        }
+
         #status {
             min-height: 24px;
             margin-top: 20px;
@@ -143,7 +161,7 @@
 
             <p class="expires-at">
                 有効期限：
-                {{ optional($payment->expires_at)->format('Y-m-d H:i:s') ?? '未設定' }}
+                {{ optional($paymentExpiresAt)->format('Y-m-d H:i:s') ?? '未設定' }}
             </p>
 
             <button id="connect-button" type="button">
@@ -158,6 +176,16 @@
             <button id="pay-button" type="button">
                 {{ number_format($payment->amount) }} JPYCを支払う
             </button>
+
+            @if ($livtWalletPaymentUrl)
+                <a
+                    id="livt-wallet-button"
+                    class="wallet-launch-button"
+                    href="{{ $livtWalletPaymentUrl }}"
+                >
+                    LivT Walletで支払う
+                </a>
+            @endif
 
             <button
                 id="history-button"
@@ -224,8 +252,9 @@
         const PAYMENT_ID = @json((string) $payment->id);
         const PAYMENT_AMOUNT = @json((string) $payment->amount);
         const PAYMENT_STATUS = @json((string) $payment->status);
+        const HAS_LIVT_WALLET_OPTION = @json($livtWalletPaymentUrl !== null);
         const EXPIRES_AT = @json(
-            optional($payment->expires_at)->toIso8601String()
+            optional($paymentExpiresAt)->toIso8601String()
         );
 
         let isPaying = false;
@@ -272,9 +301,15 @@
              */
             const userToken = localStorage.getItem("user_token");
 
-            if (!userToken) {
+            if (!userToken && !HAS_LIVT_WALLET_OPTION) {
                 saveReturnPathAndRedirectToLogin();
                 return;
+            }
+
+            if (!userToken) {
+                showInfo(
+                    "MetaMaskで支払う場合はLivTへのログインが必要です。"
+                );
             }
 
             startPolling();

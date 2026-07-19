@@ -8,9 +8,11 @@ use App\Models\Store;
 use App\Models\User;
 use App\Models\Wallet;
 use Closure;
+use Illuminate\Database\Events\TransactionBeginning;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
@@ -208,6 +210,254 @@ class PaymentConfirmTest extends TestCase
 
         $this->assertPaymentIsStillPending($payment);
         Http::assertSentCount(1);
+    }
+
+    public function test_rpc_connection_failure_fails_safely(): void
+    {
+        $payment = $this->createPayment();
+        $this->authenticateUser();
+        Http::fake(Http::failedConnection('Connection failed at private RPC URL'));
+
+        $this->postJson(
+            "/api/payments/{$payment->id}/confirm",
+            ['tx_hash' => self::TX_HASH]
+        )
+            ->assertServiceUnavailable()
+            ->assertExactJson(['error' => 'WEB3 RPC is unavailable']);
+
+        $this->assertPaymentIsStillPending($payment);
+        Http::assertSentCount(1);
+    }
+
+    public function test_rpc_timeout_fails_safely(): void
+    {
+        $payment = $this->createPayment();
+        $this->authenticateUser();
+        Http::fake(Http::failedConnection('Operation timed out with provider credentials'));
+
+        $this->postJson(
+            "/api/payments/{$payment->id}/confirm",
+            ['tx_hash' => self::TX_HASH]
+        )
+            ->assertServiceUnavailable()
+            ->assertExactJson(['error' => 'WEB3 RPC is unavailable']);
+
+        $this->assertPaymentIsStillPending($payment);
+        Http::assertSentCount(1);
+    }
+
+    public function test_rpc_http_4xx_response_fails_safely(): void
+    {
+        $payment = $this->createPayment();
+        $this->authenticateUser();
+        Http::fake(fn () => Http::response(
+            'Provider rejected credential secret',
+            429
+        ));
+
+        $this->postJson(
+            "/api/payments/{$payment->id}/confirm",
+            ['tx_hash' => self::TX_HASH]
+        )
+            ->assertServiceUnavailable()
+            ->assertExactJson(['error' => 'WEB3 RPC is unavailable']);
+
+        $this->assertPaymentIsStillPending($payment);
+        Http::assertSentCount(1);
+    }
+
+    public function test_rpc_http_5xx_response_fails_safely(): void
+    {
+        $payment = $this->createPayment();
+        $this->authenticateUser();
+        Http::fake(fn () => Http::response(
+            'Provider failed at internal RPC URL',
+            502
+        ));
+
+        $this->postJson(
+            "/api/payments/{$payment->id}/confirm",
+            ['tx_hash' => self::TX_HASH]
+        )
+            ->assertServiceUnavailable()
+            ->assertExactJson(['error' => 'WEB3 RPC is unavailable']);
+
+        $this->assertPaymentIsStillPending($payment);
+        Http::assertSentCount(1);
+    }
+
+    public function test_empty_rpc_response_body_fails_safely(): void
+    {
+        $payment = $this->createPayment();
+        $this->authenticateUser();
+        Http::fake(fn () => Http::response(''));
+
+        $this->postJson(
+            "/api/payments/{$payment->id}/confirm",
+            ['tx_hash' => self::TX_HASH]
+        )
+            ->assertInternalServerError()
+            ->assertExactJson(['error' => 'Invalid WEB3 RPC response']);
+
+        $this->assertPaymentIsStillPending($payment);
+        Http::assertSentCount(1);
+    }
+
+    public function test_non_json_rpc_response_body_fails_safely(): void
+    {
+        $payment = $this->createPayment();
+        $this->authenticateUser();
+        Http::fake(fn () => Http::response(
+            '<html>Private upstream error</html>',
+            headers: ['Content-Type' => 'text/html']
+        ));
+
+        $this->postJson(
+            "/api/payments/{$payment->id}/confirm",
+            ['tx_hash' => self::TX_HASH]
+        )
+            ->assertInternalServerError()
+            ->assertExactJson(['error' => 'Invalid WEB3 RPC response']);
+
+        $this->assertPaymentIsStillPending($payment);
+        Http::assertSentCount(1);
+    }
+
+    public function test_invalid_json_rpc_response_fails_safely(): void
+    {
+        $payment = $this->createPayment();
+        $this->authenticateUser();
+        Http::fake(fn () => Http::response(
+            '{"jsonrpc":"2.0","id":1,"result":',
+            headers: ['Content-Type' => 'application/json']
+        ));
+
+        $this->postJson(
+            "/api/payments/{$payment->id}/confirm",
+            ['tx_hash' => self::TX_HASH]
+        )
+            ->assertInternalServerError()
+            ->assertExactJson(['error' => 'Invalid WEB3 RPC response']);
+
+        $this->assertPaymentIsStillPending($payment);
+        Http::assertSentCount(1);
+    }
+
+    public function test_rpc_response_missing_result_fails_safely(): void
+    {
+        $payment = $this->createPayment();
+        $this->authenticateUser();
+        Http::fake(fn () => Http::response([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+        ]));
+
+        $this->postJson(
+            "/api/payments/{$payment->id}/confirm",
+            ['tx_hash' => self::TX_HASH]
+        )
+            ->assertInternalServerError()
+            ->assertExactJson(['error' => 'Invalid WEB3 RPC response']);
+
+        $this->assertPaymentIsStillPending($payment);
+        Http::assertSentCount(1);
+    }
+
+    public function test_json_rpc_provider_error_fails_without_retrying(): void
+    {
+        $payment = $this->createPayment();
+        $this->authenticateUser();
+        Http::fake(fn () => Http::response([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'error' => [
+                'code' => -32601,
+                'message' => 'Private provider message with RPC URL',
+            ],
+        ]));
+
+        $this->postJson(
+            "/api/payments/{$payment->id}/confirm",
+            ['tx_hash' => self::TX_HASH]
+        )
+            ->assertStatus(502)
+            ->assertExactJson(['error' => 'WEB3 RPC provider error']);
+
+        $this->assertPaymentIsStillPending($payment);
+        Http::assertSentCount(1);
+    }
+
+    public function test_malformed_transaction_receipt_result_fails_safely(): void
+    {
+        $payment = $this->createPayment();
+        $this->authenticateUser();
+        $this->fakeRpc('not-a-receipt');
+
+        $this->postJson(
+            "/api/payments/{$payment->id}/confirm",
+            ['tx_hash' => self::TX_HASH]
+        )
+            ->assertBadRequest()
+            ->assertExactJson(['error' => 'Transaction failed']);
+
+        $this->assertPaymentIsStillPending($payment);
+        Http::assertSentCount(2);
+    }
+
+    public function test_receipt_rpc_failure_after_successful_chain_id_fails_without_finalization_transaction(): void
+    {
+        $payment = $this->createPayment();
+        $this->authenticateUser();
+        $baselineTransactionLevel = DB::transactionLevel();
+        $transactionLevels = [];
+        $transactionsStarted = 0;
+        Event::listen(
+            TransactionBeginning::class,
+            function () use (&$transactionsStarted): void {
+                $transactionsStarted++;
+            }
+        );
+        $failedConnection = Http::failedConnection(
+            'Receipt timeout at private RPC URL'
+        );
+
+        Http::fake(function (Request $request) use (
+            $baselineTransactionLevel,
+            &$transactionLevels,
+            $failedConnection
+        ) {
+            $transactionLevels[] = DB::transactionLevel();
+
+            if ($request['method'] === 'eth_chainId') {
+                return Http::response([
+                    'jsonrpc' => '2.0',
+                    'id' => 1,
+                    'result' => '0x3e9',
+                ]);
+            }
+
+            $this->assertSame(
+                $baselineTransactionLevel,
+                DB::transactionLevel()
+            );
+
+            return $failedConnection($request);
+        });
+
+        $this->postJson(
+            "/api/payments/{$payment->id}/confirm",
+            ['tx_hash' => self::TX_HASH]
+        )
+            ->assertServiceUnavailable()
+            ->assertExactJson(['error' => 'WEB3 RPC is unavailable']);
+
+        $this->assertPaymentIsStillPending($payment);
+        $this->assertSame(
+            [$baselineTransactionLevel, $baselineTransactionLevel],
+            $transactionLevels
+        );
+        $this->assertSame(0, $transactionsStarted);
+        Http::assertSentCount(2);
     }
 
     public function test_missing_receipt_fails(): void
@@ -537,7 +787,7 @@ class PaymentConfirmTest extends TestCase
             'password' => 'not-used-by-this-test',
         ]);
 
-        Sanctum::actingAs($user);
+        Sanctum::actingAs($user, ['*']);
 
         return $user;
     }

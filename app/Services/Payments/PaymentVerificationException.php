@@ -3,6 +3,7 @@
 namespace App\Services\Payments;
 
 use RuntimeException;
+use Throwable;
 
 class PaymentVerificationException extends RuntimeException
 {
@@ -28,14 +29,25 @@ class PaymentVerificationException extends RuntimeException
 
     public const CHAIN_ID_MISMATCH = 'chain_id_mismatch';
 
+    public const RPC_TRANSPORT_FAILURE = 'rpc_transport_failure';
+
+    public const MALFORMED_RPC_RESPONSE = 'malformed_rpc_response';
+
+    public const JSON_RPC_PROVIDER_ERROR = 'json_rpc_provider_error';
+
     public const TRANSACTION_NOT_FOUND = 'transaction_not_found';
 
     public const TRANSACTION_FAILED = 'transaction_failed';
 
     public const INVALID_TRANSACTION = 'invalid_transaction';
 
-    public function __construct(public readonly string $reason)
-    {
-        parent::__construct($reason);
+    public function __construct(
+        public readonly string $reason,
+        public readonly ?string $rpcMethod = null,
+        public readonly ?int $upstreamStatus = null,
+        public readonly ?int $providerCode = null,
+        ?Throwable $previous = null
+    ) {
+        parent::__construct($reason, 0, $previous);
     }
 }

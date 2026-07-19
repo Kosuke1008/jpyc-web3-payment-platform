@@ -14,7 +14,6 @@ return [
     |
     */
 
-
     'postmark' => [
         'key' => env('POSTMARK_API_KEY'),
     ],
@@ -66,6 +65,18 @@ return [
         'block_explorer_url' => env('WEB3_NETWORK', 'sepolia') === 'kairos'
             ? 'https://kairos.kaiascan.io'
             : 'https://sepolia.etherscan.io',
+
+        'token_symbol' => env('WEB3_TOKEN_SYMBOL', 'JPYC'),
+
+        'token_decimals' => env('WEB3_TOKEN_DECIMALS', 18),
+    ],
+
+    'livt_wallet' => [
+        'url' => env('LIVT_WALLET_URL'),
+        'payment_token_expiration_minutes' => env(
+            'LIVT_PAYMENT_TOKEN_EXPIRATION_MINUTES',
+            30
+        ),
     ],
 
 ];
