@@ -639,6 +639,7 @@ statusElement.textContent = chainId;
         */
 
         async function confirmPayment(txHash, userToken) {
+            // [Flow M] 既存MetaMaskも同じbackend確認APIへtxHashを渡す。
             const response = await fetch(
                 `/api/payments/${PAYMENT_ID}/confirm`,
                 {

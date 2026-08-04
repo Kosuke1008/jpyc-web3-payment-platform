@@ -23,6 +23,7 @@ class PaymentTransactionVerifier
         string $transactionHash,
         int $userId
     ): void {
+        // [Flow N] クライアントの成功報告を信用せず、共有VerifierでRPC検証する。
         $normalizedHash = $this->normalizeTransactionHash($transactionHash);
         $payment = $this->loadEligiblePayment($paymentId, $normalizedHash);
         $rpcUrl = $this->configuredRpcUrl();
@@ -30,9 +31,11 @@ class PaymentTransactionVerifier
 
         $this->verifyChainId($rpcUrl);
 
+        // [Flow O] Kairos上の成功receiptが得られるまで既存上限内で確認する。
         $receipt = $this->fetchSuccessfulReceipt($rpcUrl, $normalizedHash);
         $walletAddress = $this->storeWalletAddress($payment->store_id);
 
+        // [Flow Q] JPYC contract・recipient・amountのTransferを照合する。
         $this->assertMatchingTransfer(
             $receipt,
             $tokenContract,
@@ -40,7 +43,9 @@ class PaymentTransactionVerifier
             $this->expectedAtomicAmount($payment->amount)
         );
 
+        // [Flow P] ここまでの失敗ではfinalizationせず、支払いをpendingに保つ。
         try {
+            // [Flow R] RPC完了後にだけ短いDB transactionとrow lockを開始する。
             DB::transaction(function () use (
                 $paymentId,
                 $normalizedHash,
@@ -67,6 +72,8 @@ class PaymentTransactionVerifier
                     $this->expectedAtomicAmount($payment->amount)
                 );
 
+                // [Flow S] paymentをconfirmedへ遷移する。
+                // [Flow T] tx_hash/user_id/paid_atを同じ更新で記録する。
                 $updated = DB::table('payments')
                     ->where('id', $paymentId)
                     ->where('status', 'pending')

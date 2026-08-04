@@ -20,6 +20,7 @@ class PaymentController extends Controller
         Request $request,
         PaymentTransactionVerifier $verifier
     ): JsonResponse {
+        // [Flow M] MetaMask/LivT Wallet共通の入口でtxHashを受け取る。
         $user = $request->user();
 
         if (! $user) {
@@ -93,6 +94,7 @@ class PaymentController extends Controller
         $storeId = $staff->store_id;
         $staffId = $staff->id;
 
+        // [Flow B] 期限付きのpending支払いを既存DBへ作成する。
         $payment = Payment::create([
             'store_id' => $storeId,
             'staff_id' => $staffId,
@@ -111,6 +113,7 @@ class PaymentController extends Controller
             return response()->json(['error' => 'QR generation failed'], 500);
         }
 
+        // [Flow C] payment IDと既存の支払いURL/QRをPOSへ返す。
         return response()->json([
             'payment_id' => $payment->id,
             'amount' => $payment->amount,
@@ -121,6 +124,7 @@ class PaymentController extends Controller
 
     public function show($id): JsonResponse
     {
+        // [Flow E] DBと設定を正本としてsource-neutralな支払い情報を返す。
         $payment = Payment::with('store.wallet')->findOrFail($id);
         $amount = (string) $payment->amount;
         $recipientAddress = $payment->store?->wallet?->address;

@@ -23,6 +23,7 @@ class PayController extends Controller
 
     private function livtWalletPaymentUrl(Payment $payment): ?string
     {
+        // [Flow D] 支払いIDだけをWalletへ渡し、金額や宛先は渡さない。
         $walletUrl = config('services.livt_wallet.url');
 
         if (! is_string($walletUrl) || filter_var($walletUrl, FILTER_VALIDATE_URL) === false) {

@@ -12,6 +12,7 @@ class PaymentAuthenticationController extends Controller
 {
     public function login(Request $request): JsonResponse
     {
+        // [Flow I] Wallet秘密情報とは分離した短時間・決済限定tokenを発行する。
         $validated = $request->validate([
             'email' => ['required', 'email'],
             'password' => ['required', 'string'],

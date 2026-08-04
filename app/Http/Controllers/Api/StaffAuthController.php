@@ -13,6 +13,7 @@ class StaffAuthController extends Controller
 {
     public function login(Request $request): JsonResponse
     {
+        // [Flow A] POSスタッフを認証し、支払い作成用tokenを発行する。
         $validated = $request->validate([
             'store_code' => ['required', 'string', 'max:255'],
             'staff_id' => ['required', 'string', 'max:255'],
@@ -24,7 +25,7 @@ class StaffAuthController extends Controller
             trim($validated['store_code'])
         )->first();
 
-        if (!$store) {
+        if (! $store) {
             return response()->json([
                 'message' => 'Invalid credentials',
             ], 401);
@@ -35,7 +36,7 @@ class StaffAuthController extends Controller
             ->where('is_active', true)
             ->first();
 
-        if (!$staff || !Hash::check($validated['pin'], $staff->pin)) {
+        if (! $staff || ! Hash::check($validated['pin'], $staff->pin)) {
             return response()->json([
                 'message' => 'Invalid credentials',
             ], 401);
