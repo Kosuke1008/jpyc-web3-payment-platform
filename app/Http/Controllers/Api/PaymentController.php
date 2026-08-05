@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Payment;
 use App\Models\User;
+use App\Services\Payments\FeeDelegationEndpoint;
 use App\Services\Payments\PaymentTransactionVerifier;
 use App\Services\Payments\PaymentVerificationException;
 use Illuminate\Http\JsonResponse;
@@ -192,6 +193,26 @@ class PaymentController extends Controller
             'expires_at' => $legacyExpiresAt,
             'expires_at_iso' => $expiresAtIso,
         ]);
+    }
+
+    public function sponsorshipAvailability($id): JsonResponse
+    {
+        Payment::findOrFail($id);
+
+        return response()->json([
+            'available' => $this->feeDelegationAvailable(),
+        ]);
+    }
+
+    private function feeDelegationAvailable(): bool
+    {
+        $url = config('services.fee_delegation.url');
+        $apiKey = config('services.fee_delegation.api_key');
+
+        return config('services.fee_delegation.enabled') === true
+            && config('services.web3.network') === 'kairos'
+            && (string) config('services.web3.chain_id') === '1001'
+            && FeeDelegationEndpoint::isAllowed($url, $apiKey);
     }
 
     public function status($id)

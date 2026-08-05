@@ -79,4 +79,16 @@ return [
         ),
     ],
 
+    'fee_delegation' => [
+        'enabled' => env('KAIA_FEE_DELEGATION_ENABLED', false),
+        'url' => env('KAIA_FEE_DELEGATION_URL'),
+        'api_key' => env('KAIA_FEE_DELEGATION_API_KEY'),
+        'max_gas' => env('KAIA_FEE_DELEGATION_MAX_GAS', 150000),
+        'timeout_seconds' => env(
+            'KAIA_FEE_DELEGATION_TIMEOUT_SECONDS',
+            60
+        ),
+        'cache_store' => env('KAIA_FEE_DELEGATION_CACHE_STORE', 'file'),
+    ],
+
 ];

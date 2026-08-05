@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Api\PaymentAuthenticationController;
 use App\Http\Controllers\Api\PaymentController;
+use App\Http\Controllers\Api\PaymentSponsorshipController;
 use App\Http\Controllers\Api\StaffAuthController;
 use App\Http\Controllers\Api\UserAuthController;
 use App\Http\Controllers\Api\UserPaymentController;
@@ -16,6 +17,10 @@ Route::post('/payment/login', [PaymentAuthenticationController::class, 'login'])
 
 // 決済情報表示
 Route::get('/payments/{id}', [PaymentController::class, 'show']);
+Route::get(
+    '/payments/{id}/sponsorship',
+    [PaymentController::class, 'sponsorshipAvailability']
+);
 
 // ユーザー認証必須
 Route::middleware('auth:sanctum')->group(function () {
@@ -28,6 +33,14 @@ Route::middleware('auth:sanctum')->group(function () {
         '/payments/{id}/confirm',
         [PaymentController::class, 'confirm']
     )->middleware('abilities:payment:confirm');
+
+    Route::post(
+        '/payments/{id}/sponsor',
+        PaymentSponsorshipController::class
+    )->middleware([
+        'abilities:payment:confirm',
+        'throttle:6,1',
+    ]);
 
     Route::get(
         '/user/payments',

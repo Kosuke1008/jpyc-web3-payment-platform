@@ -30,6 +30,7 @@ class PaymentDetailsTest extends TestCase
             'services.web3.token_symbol' => 'JPYC',
             'services.web3.token_decimals' => 18,
             'services.livt_wallet.url' => 'https://wallet.example.test/',
+            'services.fee_delegation.enabled' => false,
         ]);
     }
 
@@ -91,6 +92,57 @@ class PaymentDetailsTest extends TestCase
             ->assertJsonPath('status', 'pending')
             ->assertJsonPath('expires_at', '2026-07-18 02:59:00')
             ->assertJsonPath('expires_at_iso', '2026-07-18T02:59:00+00:00');
+    }
+
+    public function test_payment_details_advertise_kairos_fee_delegation_only_when_enabled(): void
+    {
+        $payment = $this->createPayment(suffix: 'fee-delegation');
+        config([
+            'services.fee_delegation.enabled' => true,
+            'services.fee_delegation.url' => 'https://fee-delegation.example.test',
+        ]);
+
+        $this->getJson("/api/payments/{$payment->id}/sponsorship")
+            ->assertOk()
+            ->assertExactJson(['available' => true]);
+
+        config(['services.web3.network' => 'kaia-mainnet']);
+
+        $this->getJson("/api/payments/{$payment->id}/sponsorship")
+            ->assertOk()
+            ->assertExactJson(['available' => false]);
+    }
+
+    public function test_payment_details_allow_only_authenticated_literal_loopback_http(): void
+    {
+        $payment = $this->createPayment(suffix: 'loopback-fee-payer');
+        config([
+            'services.fee_delegation.enabled' => true,
+            'services.fee_delegation.url' => 'http://127.0.0.1:19000',
+            'services.fee_delegation.api_key' => 'internal-test-key',
+        ]);
+
+        $this->getJson("/api/payments/{$payment->id}/sponsorship")
+            ->assertOk()
+            ->assertExactJson(['available' => true]);
+
+        foreach ([
+            ['http://127.0.0.1:19000', null],
+            ['http://localhost:19000', 'internal-test-key'],
+            ['http://127.0.0.2:19000', 'internal-test-key'],
+            ['http://fee-payer.example.test', 'internal-test-key'],
+            ['http://127.0.0.1:19000/path', 'internal-test-key'],
+            ['http://127.0.0.1:19000', "invalid\nkey"],
+        ] as [$url, $apiKey]) {
+            config([
+                'services.fee_delegation.url' => $url,
+                'services.fee_delegation.api_key' => $apiKey,
+            ]);
+
+            $this->getJson("/api/payments/{$payment->id}/sponsorship")
+                ->assertOk()
+                ->assertExactJson(['available' => false]);
+        }
     }
 
     public function test_missing_store_wallet_fails_without_exposing_configuration(): void
