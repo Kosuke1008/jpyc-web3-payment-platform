@@ -10,10 +10,17 @@ class PayController extends Controller
 {
     public function show($id)
     {
-        $payment = Payment::with('store')->findOrFail($id);
+        $payment = Payment::with('store.wallet')->findOrFail($id);
+        $recipientAddress = $payment->store?->wallet?->address;
+
+        if (! is_string($recipientAddress)
+            || preg_match('/\A0x[0-9a-fA-F]{40}\z/', $recipientAddress) !== 1) {
+            abort(500, 'Payment configuration invalid');
+        }
 
         return view('pay', [
             'payment' => $payment,
+            'recipientAddress' => strtolower($recipientAddress),
             'paymentExpiresAt' => $payment->expires_at
                 ? Carbon::parse($payment->expires_at)
                 : null,

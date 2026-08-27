@@ -1,7 +1,11 @@
 <?php
 
-use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\PayController;
+use Illuminate\Support\Facades\Route;
+
+Route::get('/', function () {
+    return view('welcome');
+});
 
 Route::get('/pay/{id}', [PayController::class, 'show']);
 
@@ -13,7 +17,7 @@ Route::get('/pos', function () {
     return view('pos.index');
 });
 
-//userログイン
+// userログイン
 Route::get('/user/login', function () {
     return view('user.login');
 });

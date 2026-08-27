@@ -213,7 +213,8 @@
             currencyName: @json(config('services.web3.currency_name')),
             currencySymbol: @json(config('services.web3.currency_symbol')),
             explorerUrl: @json(config('services.web3.block_explorer_url')),
-            tokenAddress: @json(config('services.web3.erc20_contract_address'))
+            tokenAddress: @json(config('services.web3.erc20_contract_address')),
+            recipientAddress: @json($recipientAddress)
         };
     </script>
 
@@ -229,25 +230,13 @@
             currencyName: TARGET_CURRENCY_NAME,
             currencySymbol: TARGET_CURRENCY_SYMBOL,
             explorerUrl: TARGET_EXPLORER_URL,
-            tokenAddress: TOKEN_ADDRESS
+            tokenAddress: TOKEN_ADDRESS,
+            recipientAddress: STORE_WALLET
         } = window.LIVT_CONFIG;
 
         const TARGET_CHAIN_ID = BigInt(chainId);
         const TARGET_CHAIN_ID_HEX =
             "0x" + TARGET_CHAIN_ID.toString(16);
-
-        /*
-        |--------------------------------------------------------------------------
-        | 決済設定
-        |--------------------------------------------------------------------------
-        |
-        | TOKEN_ADDRESSとSTORE_WALLETは将来的には.env/configやDBから
-        | 取得する形へ移行してください。
-        |
-        */
-
-        const STORE_WALLET =
-            "0x923bFce1ac4D318441700f26Ad4ECaF39522e32A";
 
         const PAYMENT_ID = @json((string) $payment->id);
         const PAYMENT_AMOUNT = @json((string) $payment->amount);

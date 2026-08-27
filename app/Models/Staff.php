@@ -2,25 +2,25 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Model;
+use Illuminate\Foundation\Auth\User as Authenticatable;
 use Laravel\Sanctum\HasApiTokens;
 
-class Staff extends Model
+class Staff extends Authenticatable
 {
-    protected $table = 'staffs';
-
     use HasApiTokens;
+
+    protected $table = 'staffs';
 
     protected $fillable = [
         'store_id',
         'staff_id',
         'name',
         'pin',
-        'role'
+        'role',
     ];
 
     protected $hidden = [
-        'pin'
+        'pin',
     ];
 
     public function store()

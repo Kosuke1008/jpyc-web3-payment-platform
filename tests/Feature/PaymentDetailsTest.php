@@ -187,6 +187,11 @@ class PaymentDetailsTest extends TestCase
             ->assertSee('id="connect-button"', false)
             ->assertSee('id="pay-button"', false)
             ->assertSee('window.ethereum', false)
+            ->assertSee(self::RECIPIENT_ADDRESS, false)
+            ->assertDontSee(
+                '0x923bFce1ac4D318441700f26Ad4ECaF39522e32A',
+                false
+            )
             ->assertSee('/api/payments/${PAYMENT_ID}/confirm', false)
             ->assertSee('!userToken && !HAS_LIVT_WALLET_OPTION', false)
             ->assertSee('有効期限', false)
@@ -195,6 +200,14 @@ class PaymentDetailsTest extends TestCase
                 "https://wallet.example.test/?payment_id={$payment->id}",
                 false
             );
+    }
+
+    public function test_payment_page_fails_safely_without_a_store_wallet(): void
+    {
+        $payment = $this->createPayment(createWallet: false);
+
+        $this->get("/pay/{$payment->id}")
+            ->assertInternalServerError();
     }
 
     public function test_wallet_option_is_hidden_when_not_configured(): void
