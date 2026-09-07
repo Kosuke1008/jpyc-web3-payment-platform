@@ -33,6 +33,8 @@ class PaymentSponsorshipException extends RuntimeException
 
     public const PROVIDER_REJECTED = 'provider_rejected';
 
+    public const PROVIDER_REVERTED = 'provider_reverted';
+
     public function __construct(
         public readonly string $reason,
         public readonly ?string $externalMethod = null,

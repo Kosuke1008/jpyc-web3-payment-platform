@@ -17,6 +17,8 @@ class PaymentVerificationException extends RuntimeException
 
     public const PAYMENT_EXPIRED = 'payment_expired';
 
+    public const PAYMENT_SNAPSHOT_UNAVAILABLE = 'payment_snapshot_unavailable';
+
     public const DUPLICATE_TRANSACTION_HASH = 'duplicate_transaction_hash';
 
     public const RPC_URL_NOT_CONFIGURED = 'rpc_url_not_configured';
@@ -40,6 +42,8 @@ class PaymentVerificationException extends RuntimeException
     public const TRANSACTION_FAILED = 'transaction_failed';
 
     public const INVALID_TRANSACTION = 'invalid_transaction';
+
+    public const CONFIRMATION_EVIDENCE_UNAVAILABLE = 'confirmation_evidence_unavailable';
 
     public function __construct(
         public readonly string $reason,

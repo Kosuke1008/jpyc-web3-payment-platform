@@ -34,7 +34,8 @@ class PaymentSponsorshipController extends Controller
         try {
             $transactionHash = $service->sponsor(
                 $id,
-                $validated['sender_signed_tx']
+                $validated['sender_signed_tx'],
+                $user->id
             );
         } catch (PaymentSponsorshipException $exception) {
             return $this->sponsorshipError($exception);
@@ -65,7 +66,8 @@ class PaymentSponsorshipController extends Controller
             PaymentSponsorshipException::SPONSORSHIP_CONFLICT => [
                 'Fee sponsorship already requested', 409,
             ],
-            PaymentSponsorshipException::PROVIDER_REJECTED => [
+            PaymentSponsorshipException::PROVIDER_REJECTED,
+            PaymentSponsorshipException::PROVIDER_REVERTED => [
                 'Fee sponsorship rejected', 502,
             ],
             PaymentSponsorshipException::PROVIDER_STATUS_UNKNOWN => [

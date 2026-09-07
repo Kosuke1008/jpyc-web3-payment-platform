@@ -2,12 +2,15 @@
 
 namespace Tests\Feature;
 
+use App\Blockchain\NetworkProfileRegistry;
 use App\Models\Payment;
 use App\Models\Staff;
 use App\Models\Store;
 use App\Models\Wallet;
+use App\Payments\PaymentSnapshot;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 
 class PaymentDetailsTest extends TestCase
@@ -23,15 +26,19 @@ class PaymentDetailsTest extends TestCase
         parent::setUp();
 
         config([
-            'services.web3.network' => 'kairos',
-            'services.web3.chain_name' => 'Kaia Kairos Testnet',
-            'services.web3.chain_id' => 1001,
-            'services.web3.erc20_contract_address' => self::TOKEN_ADDRESS,
-            'services.web3.token_symbol' => 'JPYC',
-            'services.web3.token_decimals' => 18,
+            'blockchain.network' => 'kairos',
+            'blockchain.profiles.kairos.chain_name' => 'Kaia Kairos Testnet',
+            'blockchain.profiles.kairos.chain_id' => 1001,
+            'blockchain.profiles.kairos.jpyc.contract' => self::TOKEN_ADDRESS,
+            'blockchain.profiles.kairos.jpyc.symbol' => 'JPYC',
+            'blockchain.profiles.kairos.jpyc.decimals' => 18,
             'services.livt_wallet.url' => 'https://wallet.example.test/',
             'services.fee_delegation.enabled' => false,
         ]);
+
+        if (DB::getDriverName() === 'sqlite') {
+            DB::statement('PRAGMA ignore_check_constraints = ON');
+        }
     }
 
     public function test_public_payment_details_are_authoritative_and_source_neutral(): void
@@ -106,7 +113,7 @@ class PaymentDetailsTest extends TestCase
             ->assertOk()
             ->assertExactJson(['available' => true]);
 
-        config(['services.web3.network' => 'kaia-mainnet']);
+        config(['blockchain.network' => 'kaia-mainnet']);
 
         $this->getJson("/api/payments/{$payment->id}/sponsorship")
             ->assertOk()
@@ -145,32 +152,50 @@ class PaymentDetailsTest extends TestCase
         }
     }
 
-    public function test_missing_store_wallet_fails_without_exposing_configuration(): void
+    public function test_payment_details_keep_snapshotted_recipient_after_wallet_is_removed(): void
     {
         $payment = $this->createPayment(createWallet: false);
 
         $this->getJson("/api/payments/{$payment->id}")
-            ->assertInternalServerError()
-            ->assertExactJson(['error' => 'Payment details unavailable']);
+            ->assertOk()
+            ->assertJsonPath('recipient_address', self::RECIPIENT_ADDRESS);
     }
 
-    public function test_invalid_payment_configuration_fails_safely(): void
+    public function test_payment_details_keep_snapshot_when_current_token_configuration_changes(): void
     {
         $payment = $this->createPayment();
-        config(['services.web3.erc20_contract_address' => 'not-an-address']);
+        config([
+            'blockchain.profiles.kairos.jpyc.contract' => '0x9999999999999999999999999999999999999999',
+            'blockchain.profiles.kairos.jpyc.decimals' => 6,
+        ]);
 
         $this->getJson("/api/payments/{$payment->id}")
-            ->assertInternalServerError()
-            ->assertExactJson(['error' => 'Payment details unavailable']);
+            ->assertOk()
+            ->assertJsonPath('token_contract', self::TOKEN_ADDRESS)
+            ->assertJsonPath('token_decimals', 18)
+            ->assertJsonPath('atomic_amount', '125000000000000000000');
+    }
 
-        config([
-            'services.web3.erc20_contract_address' => self::TOKEN_ADDRESS,
-            'services.web3.token_decimals' => 'not-a-number',
+    public function test_legacy_payment_without_snapshot_fails_closed(): void
+    {
+        $payment = $this->createPayment();
+        DB::table('payments')->where('id', $payment->id)->update([
+            'network' => null,
+            'network_profile_version' => null,
+            'chain_id' => null,
+            'token_contract' => null,
+            'token_symbol' => null,
+            'token_decimals' => null,
+            'recipient_address' => null,
+            'display_amount' => null,
+            'atomic_amount' => null,
         ]);
 
         $this->getJson("/api/payments/{$payment->id}")
             ->assertInternalServerError()
             ->assertExactJson(['error' => 'Payment details unavailable']);
+
+        $this->get("/pay/{$payment->id}")->assertInternalServerError();
     }
 
     public function test_missing_payment_returns_not_found(): void
@@ -202,20 +227,37 @@ class PaymentDetailsTest extends TestCase
             );
     }
 
-    public function test_payment_page_fails_safely_without_a_store_wallet(): void
+    public function test_payment_page_keeps_snapshotted_recipient_after_wallet_is_removed(): void
     {
         $payment = $this->createPayment(createWallet: false);
 
         $this->get("/pay/{$payment->id}")
-            ->assertInternalServerError();
+            ->assertOk()
+            ->assertSee(self::RECIPIENT_ADDRESS, false);
+    }
+
+    public function test_payment_page_uses_snapshot_after_profile_token_changes(): void
+    {
+        $payment = $this->createPayment();
+        config([
+            'blockchain.profiles.kairos.jpyc.contract' => '0x9999999999999999999999999999999999999999',
+            'blockchain.profiles.kairos.jpyc.decimals' => 6,
+        ]);
+
+        $this->get("/pay/{$payment->id}")
+            ->assertOk()
+            ->assertSee(self::TOKEN_ADDRESS, false)
+            ->assertDontSee(
+                '0x9999999999999999999999999999999999999999',
+                false
+            )
+            ->assertSee('const PAYMENT_AMOUNT = "125"', false);
     }
 
     public function test_wallet_option_is_hidden_when_not_configured(): void
     {
         config(['services.livt_wallet.url' => null]);
-        $payment = $this->createPayment([
-            'expires_at' => null,
-        ]);
+        $payment = $this->createPayment();
 
         $this->get("/pay/{$payment->id}")
             ->assertOk()
@@ -225,9 +267,7 @@ class PaymentDetailsTest extends TestCase
 
     public function test_wallet_option_rejects_urls_with_credentials_or_existing_payload(): void
     {
-        $payment = $this->createPayment([
-            'expires_at' => null,
-        ]);
+        $payment = $this->createPayment();
 
         foreach ([
             'https://user:secret@wallet.example.test/',
@@ -288,12 +328,24 @@ class PaymentDetailsTest extends TestCase
             ]);
         }
 
-        return Payment::create(array_merge([
+        $attributes = array_merge([
             'store_id' => $store->id,
             'staff_id' => $staff->id,
             'amount' => 125,
             'status' => 'pending',
             'expires_at' => now()->addMinutes(10),
-        ], $overrides));
+        ], $overrides);
+        $snapshot = PaymentSnapshot::create(
+            app(NetworkProfileRegistry::class)->get('kairos'),
+            self::RECIPIENT_ADDRESS,
+            $attributes['amount'],
+            $attributes['expires_at']
+        );
+
+        return Payment::create(array_merge(
+            $attributes,
+            $snapshot->databaseAttributes(),
+            $overrides
+        ));
     }
 }

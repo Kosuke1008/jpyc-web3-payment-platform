@@ -2,6 +2,7 @@
 
 namespace App\Services\Payments;
 
+use App\Blockchain\NetworkProfileRegistry;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 use JsonException;
@@ -17,6 +18,10 @@ class KaiaFeeDelegatedTransactionInspector implements FeeDelegatedTransactionIns
     private const SECP256K1_ORDER = '115792089237316195423570985008687907852837564279074904382605163141518161494337';
 
     private const SECP256K1_HALF_ORDER = '57896044618658097711785492504343953926418782139537452191302581570759080747168';
+
+    public function __construct(
+        private readonly NetworkProfileRegistry $networks
+    ) {}
 
     public function inspect(string $senderSignedTransaction): SponsoredTransfer
     {
@@ -73,7 +78,10 @@ class KaiaFeeDelegatedTransactionInspector implements FeeDelegatedTransactionIns
             $this->invalidTransaction();
         }
 
-        $chainId = $this->chainIdFromSignatures($signatures);
+        $chainId = $this->chainIdFromSignatures(
+            $signatures,
+            $this->networks->active()->chainId
+        );
         $selector = bin2hex(substr($input, 0, 4));
         $recipientWord = substr($input, 4, 32);
 
@@ -97,7 +105,8 @@ class KaiaFeeDelegatedTransactionInspector implements FeeDelegatedTransactionIns
                 gmp_init(bin2hex(substr($input, 36, 32)), 16),
                 10
             ),
-            gasLimit: $gasLimit
+            gasLimit: $gasLimit,
+            nonce: $nonceValue
         );
     }
 
@@ -287,8 +296,10 @@ class KaiaFeeDelegatedTransactionInspector implements FeeDelegatedTransactionIns
         return $value;
     }
 
-    private function chainIdFromSignatures(array $signatures): int
-    {
+    private function chainIdFromSignatures(
+        array $signatures,
+        int $expectedChainId
+    ): int {
         if ($signatures === []) {
             $this->invalidTransaction();
         }
@@ -326,11 +337,11 @@ class KaiaFeeDelegatedTransactionInspector implements FeeDelegatedTransactionIns
 
             if ((gmp_cmp($vNumber, $validV1) !== 0
                     && gmp_cmp($vNumber, $validV2) !== 0)
-                || $derivedString !== '1001') {
+                || $derivedString !== (string) $expectedChainId) {
                 $this->invalidTransaction();
             }
 
-            $chainId ??= 1001;
+            $chainId ??= $expectedChainId;
         }
 
         return $chainId ?? throw new PaymentSponsorshipException(
@@ -444,13 +455,7 @@ class KaiaFeeDelegatedTransactionInspector implements FeeDelegatedTransactionIns
 
     private function assertRecoveredSender(string $raw, string $sender): void
     {
-        $rpcUrl = config('services.web3.rpc_url');
-
-        if (! is_string($rpcUrl) || $rpcUrl === '') {
-            throw new PaymentSponsorshipException(
-                PaymentSponsorshipException::CONFIGURATION_ERROR
-            );
-        }
+        $rpcUrl = $this->networks->active()->rpcUrl;
 
         try {
             $response = Http::timeout(30)->post($rpcUrl, [

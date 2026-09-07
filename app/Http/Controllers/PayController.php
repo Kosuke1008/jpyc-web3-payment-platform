@@ -2,29 +2,44 @@
 
 namespace App\Http\Controllers;
 
+use App\Blockchain\NetworkExecutionDisabledException;
+use App\Blockchain\NetworkProfileRegistry;
 use App\Models\Payment;
-use Illuminate\Support\Carbon;
+use App\Payments\InvalidPaymentSnapshotException;
+use App\Payments\PaymentSnapshot;
 use Illuminate\Support\Uri;
+use Throwable;
 
 class PayController extends Controller
 {
-    public function show($id)
+    public function show($id, NetworkProfileRegistry $networks)
     {
-        $payment = Payment::with('store.wallet')->findOrFail($id);
-        $recipientAddress = $payment->store?->wallet?->address;
+        $payment = Payment::with('store')->findOrFail($id);
 
-        if (! is_string($recipientAddress)
-            || preg_match('/\A0x[0-9a-fA-F]{40}\z/', $recipientAddress) !== 1) {
+        try {
+            $paymentSnapshot = PaymentSnapshot::fromRecord($payment);
+            $networkProfile = $networks->get($paymentSnapshot->network);
+
+            if ($networkProfile->chainId !== $paymentSnapshot->chainId) {
+                throw new InvalidPaymentSnapshotException(
+                    'Payment chain snapshot does not match its network.'
+                );
+            }
+
+            $networks->assertPaymentExecutionAllowed($networkProfile);
+        } catch (NetworkExecutionDisabledException) {
+            abort(503, 'Payment execution is disabled for this network');
+        } catch (Throwable) {
             abort(500, 'Payment configuration invalid');
         }
 
         return view('pay', [
             'payment' => $payment,
-            'recipientAddress' => strtolower($recipientAddress),
-            'paymentExpiresAt' => $payment->expires_at
-                ? Carbon::parse($payment->expires_at)
-                : null,
+            'paymentSnapshot' => $paymentSnapshot,
+            'recipientAddress' => $paymentSnapshot->recipientAddress,
+            'paymentExpiresAt' => $paymentSnapshot->expiresAt,
             'livtWalletPaymentUrl' => $this->livtWalletPaymentUrl($payment),
+            'networkProfile' => $networkProfile,
         ]);
     }
 

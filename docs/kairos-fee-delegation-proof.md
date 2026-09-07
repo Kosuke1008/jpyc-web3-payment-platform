@@ -35,7 +35,7 @@ LivT Wallet
 ## 安全境界
 
 - 機能は既定で無効です。
-- `WEB3_NETWORK=kairos`かつchain ID 1001のときだけ有効になります。
+- `BLOCKCHAIN_NETWORK=kairos`の承認済みprofile（chain ID 1001）のときだけ有効になります。旧`WEB3_NETWORK`は移行期間中だけ互換入力として受け付けます。
 - Mainnetではfail-closedです。
 - runnerが起動ごとに生成する内部BearerはLaravelとsidecarだけが保持し、Walletへ返しません。
 - Fee Payer秘密鍵はsidecarの`.env`だけが保持し、Laravelへ渡しません。
@@ -53,7 +53,7 @@ LivT Wallet
 - `/home/kosuke/projects/livt-fee-payer`で`corepack pnpm setup:kairos`を一度だけ実行し、Kairos専用Fee Payerを作成すること
 - Fee Payer公開アドレスにKairos Faucetから必要最小限のKAIAを用意すること
 - runner生成の内部BearerとFee Payer秘密鍵をコマンド履歴、ブラウザ、ログ、ドキュメントへ貼らないこと
-- `storage/framework/cache`をLaravel processが読み書きできること。`KAIA_FEE_DELEGATION_CACHE_STORE=file`を実証中は維持すること
+- Phase 6の`payment_fee_delegation_attempts` migrationが適用済みで、Laravel processが同tableを読み書きできること。attemptはDBで永続化される
 
 ## Edgeでの実証
 

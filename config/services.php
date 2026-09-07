@@ -35,42 +35,6 @@ return [
         ],
     ],
 
-    'web3' => [
-        'network' => env('WEB3_NETWORK', 'sepolia'),
-
-        'rpc_url' => env('WEB3_NETWORK', 'sepolia') === 'kairos'
-            ? env('KAIROS_RPC_URL')
-            : env('ALCHEMY_RPC_URL'),
-
-        'erc20_contract_address' => env('WEB3_NETWORK', 'sepolia') === 'kairos'
-            ? env('KAIROS_ERC20_CONTRACT_ADDRESS')
-            : env('ERC20_CONTRACT_ADDRESS'),
-
-        'chain_id' => env('WEB3_NETWORK', 'sepolia') === 'kairos'
-            ? 1001
-            : 11155111,
-
-        'chain_name' => env('WEB3_NETWORK', 'sepolia') === 'kairos'
-            ? 'Kaia Kairos Testnet'
-            : 'Ethereum Sepolia',
-
-        'currency_name' => env('WEB3_NETWORK', 'sepolia') === 'kairos'
-            ? 'KAIA'
-            : 'Sepolia ETH',
-
-        'currency_symbol' => env('WEB3_NETWORK', 'sepolia') === 'kairos'
-            ? 'KAIA'
-            : 'ETH',
-
-        'block_explorer_url' => env('WEB3_NETWORK', 'sepolia') === 'kairos'
-            ? 'https://kairos.kaiascan.io'
-            : 'https://sepolia.etherscan.io',
-
-        'token_symbol' => env('WEB3_TOKEN_SYMBOL', 'JPYC'),
-
-        'token_decimals' => env('WEB3_TOKEN_DECIMALS', 18),
-    ],
-
     'livt_wallet' => [
         'url' => env('LIVT_WALLET_URL'),
         'payment_token_expiration_minutes' => env(
@@ -81,6 +45,8 @@ return [
 
     'fee_delegation' => [
         'enabled' => env('KAIA_FEE_DELEGATION_ENABLED', false),
+        // Explicit provider selection; never derive this from APP_ENV.
+        'mode' => env('FEE_DELEGATION_MODE', 'self-hosted'),
         'url' => env('KAIA_FEE_DELEGATION_URL'),
         'api_key' => env('KAIA_FEE_DELEGATION_API_KEY'),
         'max_gas' => env('KAIA_FEE_DELEGATION_MAX_GAS', 150000),
@@ -88,7 +54,17 @@ return [
             'KAIA_FEE_DELEGATION_TIMEOUT_SECONDS',
             60
         ),
-        'cache_store' => env('KAIA_FEE_DELEGATION_CACHE_STORE', 'file'),
+        // Phase 7: a deliberately selected, single-Payment Kairos test only.
+        'kairos_managed_live_test_enabled' => env(
+            'KAIROS_MANAGED_LIVE_TEST_ENABLED',
+            false
+        ),
+        'kairos_managed_live_test_payment_id' => env(
+            'KAIROS_MANAGED_LIVE_TEST_PAYMENT_ID'
+        ),
+        'kairos_managed_live_test_max_jpy' => env(
+            'KAIROS_MANAGED_LIVE_TEST_MAX_JPYC'
+        ),
     ],
 
 ];

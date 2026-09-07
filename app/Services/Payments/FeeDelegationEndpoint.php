@@ -4,6 +4,15 @@ namespace App\Services\Payments;
 
 class FeeDelegationEndpoint
 {
+    public static function isManaged(mixed $url, mixed $apiKey): bool
+    {
+        return self::isAllowed($url, $apiKey)
+            && is_string($url)
+            && parse_url($url, PHP_URL_SCHEME) === 'https'
+            && is_string($apiKey)
+            && $apiKey !== '';
+    }
+
     public static function isAllowed(mixed $url, mixed $apiKey): bool
     {
         if (! is_string($url)

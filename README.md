@@ -5,6 +5,10 @@ LivTは、店舗でJPYC決済を受け付けるLaravelベースの決済プラ�
 POSでの決済作成から、ブロックチェーンtransactionの検証、DB上の決済確定までを
 一貫して管理します。現在のWeb3実証環境はKaia Kairosです。
 
+新規Paymentは作成時のnetwork、chain ID、JPYC contract/symbol/decimals、店舗送金先、
+表示金額、atomic amount、有効期限を不変snapshotとして保存します。作成後にactive
+network、店舗Wallet、token設定が変わっても、既存Paymentの意味は変わりません。
+
 ## 主な機能
 
 - スタッフ認証とPOS向け決済作成
@@ -14,6 +18,8 @@ POSでの決済作成から、ブロックチェーンtransactionの検証、DB�
 - 非カストディ型LivT Walletとの連携
 - LivT Fee PayerによるKairos gas代負担
 - receiptとJPYC `Transfer` eventのサーバー側検証
+- transaction・receipt・canonical blockの整合検査と確認証拠の保存
+- confirmed Paymentのread-only reconciliation
 - 重複tx hash、誤送金、期限切れ決済の拒否
 
 ## 決済フロー
@@ -66,6 +72,15 @@ POST /api/payments/{id}/confirm
 GET  /api/user/payments
 ```
 
+`GET /api/payments/{id}`の支払い条件（`network`、`chain_id`、
+`token_contract`、`token_decimals`、`recipient_address`、`display_amount`、
+`atomic_amount`、`expires_at`）はPayment snapshotから返します。snapshotを持たない
+legacy Paymentを現在設定から推測することはせず、安全に表示・検証できない場合は拒否します。
+
+確認成功時はtx hash、観測chain ID、block number/hash、receipt status、実payer、
+Transfer log index、block timestamp、検証時刻をPaymentへ保存します。`paid_at`はLivTが
+確認を受理した時刻、`chain_confirmed_at`はchain上のblock timestampです。
+
 ## 技術構成
 
 - Laravel / PHP
@@ -79,11 +94,43 @@ GET  /api/user/payments
 
 環境変数は`.env.example`を参照し、秘密情報をGitへcommitしないでください。
 
+Blockchain networkは`APP_ENV`から推測せず、明示的に選びます。既存のKairos
+実行には次を設定します。`kaia-mainnet` profileも解決できますが、Phase 4でも
+決済作成とFee Delegationをコード上で無効にしています。
+
+```dotenv
+BLOCKCHAIN_NETWORK=kairos
+BLOCKCHAIN_KAIROS_RPC_URL=https://public-en-kairos.node.kaia.io
+PAYMENTS_MAINNET_ENABLED=false
+MAINNET_FEE_DELEGATION_ENABLED=false
+MAINNET_BROADCAST_ENABLED=false
+```
+
 ```bash
 composer install
 php artisan test
 vendor/bin/pint --test
 ```
+
+保存済み確認証拠は、transactionを送信しない次のcommandで再照合できます。
+
+```bash
+php artisan payments:reconcile 123
+```
+
+Legacy PaymentのMainnet移行監査（既定はread-only）:
+
+```bash
+php artisan payments:audit-mainnet-migration
+```
+
+Kaia Mainnetのread-only RPC readiness:
+
+```bash
+php artisan blockchain:mainnet-readiness
+```
+
+必要な分離設定と実行順序は`docs/mainnet-readiness-runbook.md`を参照してください。readiness成功時もMainnet Payment、署名、Fee Delegation、broadcastは無効です。
 
 ## 関連リポジトリ
 
@@ -96,8 +143,13 @@ vendor/bin/pint --test
 - `docs/livt-wallet-payment-flow.md`: 支払い工程と実装箇所
 - `docs/kairos-fee-delegation-proof.md`: Kairos Fee Delegation実証手順
 - `docs/kairos-fee-payer-review.md`: 3リポジトリ横断のレビュー資料
+- `docs/mainnet-migration-plan.md`: Kaia Mainnet移行の段階設計
 
 ## 現在の範囲
 
 Fee Payer機能はKairos実証限定です。Mainnetでは、KMS/HSM、永続的な冪等性、
 利用上限、監査ログ、残高監視、緊急停止を追加するまで有効化しません。
+Phase 1でNetwork Profile、Phase 2でPayment Snapshot、Phase 3でConfirmation
+Evidence / Kaia Finality検証、Phase 4でDB hardeningとread-only readinessを実装しました。Mainnetでは
+決済作成、confirmation、Wallet署名、Fee Delegation、broadcastを引き続き無効にしており、
+Mainnet対応完了または本番readyではありません。

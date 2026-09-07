@@ -2,115 +2,278 @@
 
 namespace App\Services\Payments;
 
+use App\Blockchain\NetworkProfile;
+use App\Blockchain\NetworkProfileRegistry;
 use App\Models\Payment;
-use Illuminate\Contracts\Cache\Repository;
-use Illuminate\Support\Carbon;
-use Illuminate\Support\Facades\Cache;
+use App\Models\PaymentFeeDelegationAttempt;
+use App\Payments\InvalidPaymentSnapshotException;
+use App\Payments\PaymentSnapshot;
+use Illuminate\Database\UniqueConstraintViolationException;
+use Illuminate\Support\Facades\DB;
 use RuntimeException;
-use Throwable;
 
 class PaymentSponsorshipService
 {
-    private const ATTEMPT_CACHE_PREFIX = 'livt:fee-sponsorship:payment:';
-
     public function __construct(
         private readonly FeeDelegatedTransactionInspector $inspector,
-        private readonly FeeDelegationGateway $gateway
+        private readonly FeeDelegationGateway $gateway,
+        private readonly NetworkProfileRegistry $networks,
+        private readonly KaiaSenderTransactionHash $senderTransactionHash,
+        private readonly ManagedKairosLiveTestPolicy $managedLiveTestPolicy
     ) {}
 
     public function sponsor(
         int|string $paymentId,
-        string $senderSignedTransaction
+        string $senderSignedTransaction,
+        int $requesterUserId
     ): string {
-        $this->assertKairosEnabled();
-
-        $payment = Payment::with('store.wallet')->find($paymentId);
-        $expiresAt = $this->assertPaymentEligible($payment);
-
-        $tokenContract = $this->configuredTokenContract();
-        $recipient = $payment->store?->wallet?->address;
-
-        if (! is_string($recipient)
-            || preg_match('/\A0x[0-9a-fA-F]{40}\z/', $recipient) !== 1) {
-            throw new PaymentSponsorshipException(
-                PaymentSponsorshipException::CONFIGURATION_ERROR
-            );
-        }
+        $payment = Payment::find($paymentId);
+        $snapshot = $this->assertPaymentEligible($payment);
+        $profile = $this->networks->get($snapshot->network);
+        $this->assertFeeDelegationEnabled($profile, $snapshot);
 
         $transfer = $this->inspector->inspect($senderSignedTransaction);
 
-        if ($transfer->chainId !== 1001
-            || strcasecmp($transfer->tokenContract, $tokenContract) !== 0
-            || strcasecmp($transfer->recipient, $recipient) !== 0
-            || bccomp(
-                $transfer->atomicAmount,
-                $this->expectedAtomicAmount($payment->amount),
-                0
-            ) !== 0) {
+        if ($transfer->chainId !== $snapshot->chainId
+            || strcasecmp($transfer->tokenContract, $snapshot->tokenContract) !== 0
+            || strcasecmp($transfer->recipient, $snapshot->recipientAddress) !== 0
+            || bccomp($transfer->atomicAmount, $snapshot->atomicAmount, 0) !== 0) {
             throw new PaymentSponsorshipException(
                 PaymentSponsorshipException::INVALID_TRANSACTION
             );
         }
 
+        // Future per-user/store rate limits and KAIA/daily budgets belong at
+        // this boundary, after exact Payment policy validation and before any
+        // provider can sign or broadcast.
+        $this->gateway->assertConfigured();
+        $provider = $this->gateway->provider();
+        $this->managedLiveTestPolicy->assertSubmissionAllowed(
+            $snapshot,
+            (int) $payment->id,
+            $provider
+        );
         $fingerprint = hash('sha256', strtolower($senderSignedTransaction));
-        $cachedHash = $this->reserveAttempt(
-            $payment->id,
-            $fingerprint,
-            $expiresAt->copy()->addDay()
+        $senderTxHash = $this->senderTransactionHash->fromSenderSignedRlp(
+            $senderSignedTransaction
         );
 
-        if ($cachedHash !== null) {
-            return $cachedHash;
+        [$attempt, $knownHash] = $this->reserveAttempt(
+            $payment,
+            $snapshot,
+            $transfer,
+            $provider,
+            $fingerprint,
+            $senderTxHash,
+            $requesterUserId
+        );
+
+        if ($knownHash !== null) {
+            return $knownHash;
         }
 
-        // No database transaction or row lock is held while the fee payer is
-        // contacted. Payment finalization remains the existing confirm flow's
-        // responsibility.
         try {
-            $transactionHash = $this->gateway->sponsor(
-                $senderSignedTransaction
-            );
+            $submission = $this->gateway->sponsor($senderSignedTransaction);
         } catch (PaymentSponsorshipException $exception) {
-            if (in_array($exception->reason, [
-                PaymentSponsorshipException::CONFIGURATION_ERROR,
-                PaymentSponsorshipException::PROVIDER_REJECTED,
-            ], true)) {
-                $this->releaseRejectedAttempt(
-                    $payment->id,
-                    $fingerprint
-                );
-            }
+            $state = match ($exception->reason) {
+                PaymentSponsorshipException::PROVIDER_REJECTED => FeeDelegationAttemptState::REJECTED,
+                PaymentSponsorshipException::PROVIDER_REVERTED => FeeDelegationAttemptState::REVERTED,
+                default => FeeDelegationAttemptState::UNKNOWN_SUBMISSION,
+            };
+            $this->transitionAttempt($attempt->id, $state, [
+                'provider_http_status' => $exception->upstreamStatus,
+                'diagnostic_code' => match ($state) {
+                    FeeDelegationAttemptState::REJECTED => 'provider_rejected',
+                    FeeDelegationAttemptState::REVERTED => 'transaction_reverted',
+                    default => 'provider_status_unknown',
+                },
+                ...(in_array($state, [
+                    FeeDelegationAttemptState::REJECTED,
+                    FeeDelegationAttemptState::REVERTED,
+                ], true)
+                    ? ['resolved_at' => now()]
+                    : []),
+            ]);
 
             throw $exception;
         }
 
-        $this->completeAttempt(
-            $payment->id,
-            $fingerprint,
-            $transactionHash,
-            $expiresAt->copy()->addDay()
+        $this->transitionAttempt(
+            $attempt->id,
+            FeeDelegationAttemptState::SUBMITTED,
+            [
+                'tx_hash' => $submission->transactionHash,
+                'provider_http_status' => $submission->providerHttpStatus,
+                'diagnostic_code' => null,
+                'submitted_at' => now(),
+            ]
         );
 
-        return $transactionHash;
+        return $submission->transactionHash;
     }
 
-    private function assertKairosEnabled(): void
-    {
+    /** @return array{PaymentFeeDelegationAttempt, ?string} */
+    private function reserveAttempt(
+        Payment $payment,
+        PaymentSnapshot $snapshot,
+        SponsoredTransfer $transfer,
+        string $provider,
+        string $fingerprint,
+        string $senderTxHash,
+        int $requesterUserId
+    ): array {
+        try {
+            return DB::transaction(function () use (
+                $payment,
+                $snapshot,
+                $transfer,
+                $provider,
+                $fingerprint,
+                $senderTxHash,
+                $requesterUserId
+            ): array {
+                $lockedPayment = Payment::query()
+                    ->whereKey($payment->id)
+                    ->lockForUpdate()
+                    ->first();
+                $lockedSnapshot = $this->assertPaymentEligible($lockedPayment);
+
+                if (! $snapshot->hasSameSemantics($lockedSnapshot)) {
+                    throw new PaymentSponsorshipException(
+                        PaymentSponsorshipException::CONFIGURATION_ERROR
+                    );
+                }
+
+                $existing = PaymentFeeDelegationAttempt::query()
+                    ->where('payment_id', $payment->id)
+                    ->lockForUpdate()
+                    ->first();
+
+                if ($existing !== null) {
+                    return $this->existingAttempt(
+                        $existing,
+                        $provider,
+                        $fingerprint,
+                        $senderTxHash
+                    );
+                }
+
+                $attempt = PaymentFeeDelegationAttempt::create([
+                    'payment_id' => $payment->id,
+                    'requester_user_id' => $requesterUserId,
+                    'network' => $snapshot->network,
+                    'chain_id' => $snapshot->chainId,
+                    'provider' => $provider,
+                    'sender_address' => strtolower($transfer->sender),
+                    'sender_tx_hash' => strtolower($senderTxHash),
+                    'request_fingerprint' => $fingerprint,
+                    'sender_nonce' => $transfer->nonce,
+                    'state' => FeeDelegationAttemptState::RESERVED,
+                ]);
+                $attempt->transitionTo(FeeDelegationAttemptState::VALIDATED, [
+                    'validated_at' => now(),
+                ]);
+                $attempt->transitionTo(FeeDelegationAttemptState::SUBMITTING, [
+                    'submitting_at' => now(),
+                ]);
+
+                return [$attempt, null];
+            }, 3);
+        } catch (UniqueConstraintViolationException $exception) {
+            throw new PaymentSponsorshipException(
+                PaymentSponsorshipException::SPONSORSHIP_CONFLICT,
+                previous: $exception
+            );
+        }
+    }
+
+    /** @return array{PaymentFeeDelegationAttempt, ?string} */
+    private function existingAttempt(
+        PaymentFeeDelegationAttempt $attempt,
+        string $provider,
+        string $fingerprint,
+        string $senderTxHash
+    ): array {
+        if ($attempt->provider !== $provider
+            || ! hash_equals($attempt->request_fingerprint, $fingerprint)
+            || ! hash_equals($attempt->sender_tx_hash, strtolower($senderTxHash))) {
+            throw new PaymentSponsorshipException(
+                PaymentSponsorshipException::SPONSORSHIP_CONFLICT
+            );
+        }
+
+        if (in_array($attempt->state, [
+            FeeDelegationAttemptState::SUBMITTED,
+            FeeDelegationAttemptState::RECEIPT_OBSERVED,
+            FeeDelegationAttemptState::CONFIRMED,
+        ], true)
+            && is_string($attempt->tx_hash)
+            && preg_match('/\A0x[0-9a-f]{64}\z/', $attempt->tx_hash) === 1) {
+            return [$attempt, $attempt->tx_hash];
+        }
+
+        if (in_array($attempt->state, [
+            FeeDelegationAttemptState::REJECTED,
+            FeeDelegationAttemptState::REVERTED,
+        ], true)) {
+            throw new PaymentSponsorshipException(
+                $attempt->state === FeeDelegationAttemptState::REVERTED
+                    ? PaymentSponsorshipException::PROVIDER_REVERTED
+                    : PaymentSponsorshipException::PROVIDER_REJECTED,
+                upstreamStatus: $attempt->provider_http_status
+            );
+        }
+
+        throw new PaymentSponsorshipException(
+            PaymentSponsorshipException::PROVIDER_STATUS_UNKNOWN,
+            upstreamStatus: $attempt->provider_http_status
+        );
+    }
+
+    private function transitionAttempt(
+        int $attemptId,
+        string $state,
+        array $attributes
+    ): void {
+        DB::transaction(function () use ($attemptId, $state, $attributes): void {
+            $attempt = PaymentFeeDelegationAttempt::query()
+                ->whereKey($attemptId)
+                ->lockForUpdate()
+                ->firstOrFail();
+            $attempt->transitionTo($state, $attributes);
+        }, 3);
+    }
+
+    private function assertFeeDelegationEnabled(
+        NetworkProfile $profile,
+        PaymentSnapshot $snapshot
+    ): void {
         if (config('services.fee_delegation.enabled') !== true) {
             throw new PaymentSponsorshipException(
                 PaymentSponsorshipException::DISABLED
             );
         }
 
-        if (config('services.web3.network') !== 'kairos'
-            || (string) config('services.web3.chain_id') !== '1001') {
+        try {
+            $active = $this->networks->active();
+
+            if ($active->id !== $snapshot->network
+                || $profile->chainId !== $snapshot->chainId) {
+                throw new RuntimeException(
+                    'Fee payer cannot access the snapshotted network.'
+                );
+            }
+
+            $this->networks->assertFeeDelegationExecutionAllowed($profile);
+        } catch (RuntimeException $exception) {
             throw new PaymentSponsorshipException(
-                PaymentSponsorshipException::CONFIGURATION_ERROR
+                PaymentSponsorshipException::CONFIGURATION_ERROR,
+                previous: $exception
             );
         }
     }
 
-    private function assertPaymentEligible(?Payment $payment): Carbon
+    private function assertPaymentEligible(?Payment $payment): PaymentSnapshot
     {
         if ($payment === null) {
             throw new PaymentSponsorshipException(
@@ -130,241 +293,21 @@ class PaymentSponsorshipService
             );
         }
 
-        if ($payment->expires_at === null) {
-            throw new PaymentSponsorshipException(
-                PaymentSponsorshipException::CONFIGURATION_ERROR
-            );
-        }
-
         try {
-            $expiresAt = Carbon::parse($payment->expires_at);
-        } catch (Throwable $exception) {
+            $snapshot = PaymentSnapshot::fromRecord($payment);
+        } catch (InvalidPaymentSnapshotException $exception) {
             throw new PaymentSponsorshipException(
                 PaymentSponsorshipException::CONFIGURATION_ERROR,
                 previous: $exception
             );
         }
 
-        if (now()->gt($expiresAt)) {
+        if (now()->gt($snapshot->expiresAt)) {
             throw new PaymentSponsorshipException(
                 PaymentSponsorshipException::PAYMENT_EXPIRED
             );
         }
 
-        return $expiresAt;
-    }
-
-    private function configuredTokenContract(): string
-    {
-        $contract = config('services.web3.erc20_contract_address');
-
-        if (! is_string($contract)
-            || preg_match('/\A0x[0-9a-fA-F]{40}\z/', $contract) !== 1) {
-            throw new PaymentSponsorshipException(
-                PaymentSponsorshipException::CONFIGURATION_ERROR
-            );
-        }
-
-        return strtolower($contract);
-    }
-
-    private function expectedAtomicAmount(mixed $amount): string
-    {
-        $decimals = config('services.web3.token_decimals');
-        $amount = (string) $amount;
-
-        if ((string) $decimals !== '18'
-            || preg_match('/\A[0-9]+\z/', $amount) !== 1) {
-            throw new PaymentSponsorshipException(
-                PaymentSponsorshipException::CONFIGURATION_ERROR
-            );
-        }
-
-        return bcmul($amount, bcpow('10', '18', 0), 0);
-    }
-
-    private function reserveAttempt(
-        int $paymentId,
-        string $fingerprint,
-        Carbon $expiresAt
-    ): ?string {
-        return $this->withAttemptLock(
-            $paymentId,
-            PaymentSponsorshipException::PROVIDER_UNAVAILABLE,
-            function (Repository $cache) use (
-                $paymentId,
-                $fingerprint,
-                $expiresAt
-            ): ?string {
-                $key = $this->attemptKey($paymentId);
-                $attempt = $cache->get($key);
-
-                if ($attempt === null) {
-                    $stored = $cache->put($key, [
-                        'fingerprint' => $fingerprint,
-                        'state' => 'reserved',
-                    ], $expiresAt);
-
-                    if ($stored !== true) {
-                        throw new RuntimeException(
-                            'Fee sponsorship reservation was not stored.'
-                        );
-                    }
-
-                    return null;
-                }
-
-                if (! is_array($attempt)
-                    || ! is_string($attempt['fingerprint'] ?? null)
-                    || ! is_string($attempt['state'] ?? null)) {
-                    throw new PaymentSponsorshipException(
-                        PaymentSponsorshipException::PROVIDER_STATUS_UNKNOWN
-                    );
-                }
-
-                if (! hash_equals($attempt['fingerprint'], $fingerprint)) {
-                    throw new PaymentSponsorshipException(
-                        PaymentSponsorshipException::SPONSORSHIP_CONFLICT
-                    );
-                }
-
-                if ($attempt['state'] === 'succeeded'
-                    && is_string($attempt['transaction_hash'] ?? null)
-                    && preg_match(
-                        '/\A0x[0-9a-f]{64}\z/',
-                        $attempt['transaction_hash']
-                    ) === 1) {
-                    return $attempt['transaction_hash'];
-                }
-
-                throw new PaymentSponsorshipException(
-                    PaymentSponsorshipException::PROVIDER_STATUS_UNKNOWN
-                );
-            }
-        );
-    }
-
-    private function completeAttempt(
-        int $paymentId,
-        string $fingerprint,
-        string $transactionHash,
-        Carbon $expiresAt
-    ): void {
-        $this->withAttemptLock(
-            $paymentId,
-            PaymentSponsorshipException::PROVIDER_STATUS_UNKNOWN,
-            function (Repository $cache) use (
-                $paymentId,
-                $fingerprint,
-                $transactionHash,
-                $expiresAt
-            ): void {
-                $key = $this->attemptKey($paymentId);
-                $attempt = $cache->get($key);
-
-                if (! is_array($attempt)
-                    || ! is_string($attempt['fingerprint'] ?? null)
-                    || ! hash_equals(
-                        $attempt['fingerprint'],
-                        $fingerprint
-                    )) {
-                    throw new PaymentSponsorshipException(
-                        PaymentSponsorshipException::PROVIDER_STATUS_UNKNOWN
-                    );
-                }
-
-                $stored = $cache->put($key, [
-                    'fingerprint' => $fingerprint,
-                    'state' => 'succeeded',
-                    'transaction_hash' => $transactionHash,
-                ], $expiresAt);
-
-                if ($stored !== true) {
-                    throw new RuntimeException(
-                        'Fee sponsorship result was not stored.'
-                    );
-                }
-            }
-        );
-    }
-
-    private function releaseRejectedAttempt(
-        int $paymentId,
-        string $fingerprint
-    ): void {
-        try {
-            $this->withAttemptLock(
-                $paymentId,
-                PaymentSponsorshipException::PROVIDER_UNAVAILABLE,
-                function (Repository $cache) use (
-                    $paymentId,
-                    $fingerprint
-                ): void {
-                    $key = $this->attemptKey($paymentId);
-                    $attempt = $cache->get($key);
-
-                    if (is_array($attempt)
-                        && is_string($attempt['fingerprint'] ?? null)
-                        && hash_equals(
-                            $attempt['fingerprint'],
-                            $fingerprint
-                        )) {
-                        if ($cache->forget($key) !== true) {
-                            throw new RuntimeException(
-                                'Fee sponsorship reservation was not removed.'
-                            );
-                        }
-                    }
-                }
-            );
-        } catch (PaymentSponsorshipException) {
-            // Keeping the reservation is safer than allowing a second raw
-            // transaction when cache cleanup is unavailable.
-        }
-    }
-
-    private function withAttemptLock(
-        int $paymentId,
-        string $failureReason,
-        callable $operation
-    ): mixed {
-        try {
-            $cache = $this->attemptCache();
-
-            return $cache->getStore()
-                ->lock($this->attemptLockKey($paymentId), 5)
-                ->block(2, fn () => $operation($cache));
-        } catch (PaymentSponsorshipException $exception) {
-            throw $exception;
-        } catch (Throwable $exception) {
-            throw new PaymentSponsorshipException(
-                $failureReason,
-                previous: $exception
-            );
-        }
-    }
-
-    private function attemptCache(): Repository
-    {
-        $store = config('services.fee_delegation.cache_store');
-
-        if (! is_string($store)
-            || preg_match('/\A[a-zA-Z0-9_-]{1,64}\z/', $store) !== 1) {
-            throw new RuntimeException(
-                'Fee sponsorship cache store is invalid.'
-            );
-        }
-
-        return Cache::store($store);
-    }
-
-    private function attemptKey(int $paymentId): string
-    {
-        return self::ATTEMPT_CACHE_PREFIX.$paymentId;
-    }
-
-    private function attemptLockKey(int $paymentId): string
-    {
-        return $this->attemptKey($paymentId).':lock';
+        return $snapshot;
     }
 }

@@ -19,6 +19,9 @@
     </source>
     <php>
         <env name="APP_ENV" value="testing"/>
+        <env name="BLOCKCHAIN_NETWORK" value="kairos"/>
+        <env name="BLOCKCHAIN_KAIROS_RPC_URL" value="https://rpc.example.test"/>
+        <env name="BLOCKCHAIN_KAIA_MAINNET_RPC_URL" value="https://mainnet-rpc.example.test"/>
         <env name="APP_MAINTENANCE_DRIVER" value="file"/>
         <env name="BCRYPT_ROUNDS" value="4"/>
         <env name="BROADCAST_CONNECTION" value="null"/>

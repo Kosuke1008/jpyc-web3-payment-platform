@@ -155,8 +155,8 @@
             </p>
 
             <p class="amount">
-                {{ number_format($payment->amount) }}
-                <span class="currency">JPYC</span>
+                {{ number_format((int) $paymentSnapshot->displayAmount) }}
+                <span class="currency">{{ $paymentSnapshot->tokenSymbol }}</span>
             </p>
 
             <p class="expires-at">
@@ -174,7 +174,7 @@
                 </small>
 
             <button id="pay-button" type="button">
-                {{ number_format($payment->amount) }} JPYCを支払う
+                {{ number_format((int) $paymentSnapshot->displayAmount) }} {{ $paymentSnapshot->tokenSymbol }}を支払う
             </button>
 
             @if ($livtWalletPaymentUrl)
@@ -206,14 +206,17 @@
 
     <script>
         window.LIVT_CONFIG = {
-            network: @json(config('services.web3.network')),
-            chainId: @json((string) config('services.web3.chain_id')),
-            chainName: @json(config('services.web3.chain_name')),
-            rpcUrl: @json(config('services.web3.rpc_url')),
-            currencyName: @json(config('services.web3.currency_name')),
-            currencySymbol: @json(config('services.web3.currency_symbol')),
-            explorerUrl: @json(config('services.web3.block_explorer_url')),
-            tokenAddress: @json(config('services.web3.erc20_contract_address')),
+            network: @json($paymentSnapshot->network),
+            networkProfileVersion: @json($paymentSnapshot->networkProfileVersion),
+            chainId: @json((string) $paymentSnapshot->chainId),
+            chainName: @json($networkProfile->chainName),
+            rpcUrl: @json($networkProfile->rpcUrl),
+            currencyName: @json($networkProfile->currencyName),
+            currencySymbol: @json($networkProfile->currencySymbol),
+            explorerUrl: @json($networkProfile->explorerUrl),
+            tokenAddress: @json($paymentSnapshot->tokenContract),
+            tokenDecimals: @json($paymentSnapshot->tokenDecimals),
+            atomicAmount: @json($paymentSnapshot->atomicAmount),
             recipientAddress: @json($recipientAddress)
         };
     </script>
@@ -231,6 +234,8 @@
             currencySymbol: TARGET_CURRENCY_SYMBOL,
             explorerUrl: TARGET_EXPLORER_URL,
             tokenAddress: TOKEN_ADDRESS,
+            tokenDecimals: TOKEN_DECIMALS,
+            atomicAmount: PAYMENT_ATOMIC_AMOUNT,
             recipientAddress: STORE_WALLET
         } = window.LIVT_CONFIG;
 
@@ -239,7 +244,7 @@
             "0x" + TARGET_CHAIN_ID.toString(16);
 
         const PAYMENT_ID = @json((string) $payment->id);
-        const PAYMENT_AMOUNT = @json((string) $payment->amount);
+        const PAYMENT_AMOUNT = @json($paymentSnapshot->displayAmount);
         const PAYMENT_STATUS = @json((string) $payment->status);
         const HAS_LIVT_WALLET_OPTION = @json($livtWalletPaymentUrl !== null);
         const EXPIRES_AT = @json(
@@ -555,10 +560,13 @@ statusElement.textContent = chainId;
 
                 const decimals = await tokenContract.decimals();
 
-                const transferAmount = ethers.parseUnits(
-                    PAYMENT_AMOUNT,
-                    decimals
-                );
+                if (Number(decimals) !== TOKEN_DECIMALS) {
+                    throw new Error(
+                        "JPYCのdecimalsが支払い作成時の条件と一致しません"
+                    );
+                }
+
+                const transferAmount = BigInt(PAYMENT_ATOMIC_AMOUNT);
 
                 const balance =
                     await tokenContract.balanceOf(userAddress);

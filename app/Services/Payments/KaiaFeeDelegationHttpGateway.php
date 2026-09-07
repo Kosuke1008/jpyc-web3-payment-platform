@@ -3,17 +3,30 @@
 namespace App\Services\Payments;
 
 use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use JsonException;
 
-class KaiaFeeDelegationGateway implements FeeDelegationGateway
+abstract class KaiaFeeDelegationHttpGateway implements FeeDelegationGateway
 {
-    public function sponsor(string $senderSignedTransaction): string
+    private const MAX_RESPONSE_BYTES = 1_048_576;
+
+    abstract protected function managed(): bool;
+
+    public function assertConfigured(): void
     {
+        $this->configuration();
+    }
+
+    public function sponsor(
+        string $senderSignedTransaction
+    ): FeeDelegationSubmission {
         [$url, $apiKey, $timeout] = $this->configuration();
 
         try {
-            $request = Http::timeout($timeout)->acceptJson();
+            $request = Http::timeout($timeout)
+                ->acceptJson()
+                ->withOptions(['allow_redirects' => false]);
 
             if ($apiKey !== null) {
                 $request = $request->withToken($apiKey);
@@ -21,9 +34,7 @@ class KaiaFeeDelegationGateway implements FeeDelegationGateway
 
             $response = $request->post(
                 rtrim($url, '/').'/api/signAsFeePayer',
-                [
-                    'userSignedTx' => ['raw' => $senderSignedTransaction],
-                ]
+                ['userSignedTx' => ['raw' => $senderSignedTransaction]]
             );
         } catch (ConnectionException $exception) {
             throw new PaymentSponsorshipException(
@@ -33,12 +44,22 @@ class KaiaFeeDelegationGateway implements FeeDelegationGateway
             );
         }
 
+        if (strlen($response->body()) > self::MAX_RESPONSE_BYTES) {
+            throw $this->unknown($response);
+        }
+
         if (! $response->successful()) {
-            $isDefinitiveClientRejection = $response->clientError()
-                && ! in_array($response->status(), [408, 425, 429], true);
+            $definitive = $this->managed()
+                ? in_array(
+                    $response->status(),
+                    [400, 401, 403, 404, 405, 413, 415, 422],
+                    true
+                )
+                : ($response->clientError()
+                    && ! in_array($response->status(), [408, 425, 429], true));
 
             throw new PaymentSponsorshipException(
-                $isDefinitiveClientRejection
+                $definitive
                     ? PaymentSponsorshipException::PROVIDER_REJECTED
                     : PaymentSponsorshipException::PROVIDER_STATUS_UNKNOWN,
                 externalMethod: 'signAsFeePayer',
@@ -50,22 +71,27 @@ class KaiaFeeDelegationGateway implements FeeDelegationGateway
             $body = json_decode(
                 $response->body(),
                 true,
-                512,
+                64,
                 JSON_THROW_ON_ERROR
             );
         } catch (JsonException $exception) {
             throw new PaymentSponsorshipException(
                 PaymentSponsorshipException::PROVIDER_STATUS_UNKNOWN,
                 externalMethod: 'signAsFeePayer',
+                upstreamStatus: $response->status(),
                 previous: $exception
             );
         }
 
         if (! is_array($body)) {
-            throw new PaymentSponsorshipException(
-                PaymentSponsorshipException::PROVIDER_STATUS_UNKNOWN,
-                externalMethod: 'signAsFeePayer'
-            );
+            throw $this->unknown($response);
+        }
+
+        if ($this->managed()
+            && (! isset($body['message'])
+                || ! is_string($body['message'])
+                || $body['message'] === '')) {
+            throw $this->unknown($response);
         }
 
         $providerStatus = $body['status'] ?? null;
@@ -76,75 +102,74 @@ class KaiaFeeDelegationGateway implements FeeDelegationGateway
         $providerError = $body['error'] ?? null;
 
         if ($providerStatus === false) {
-            $isContradictory = $receiptStatus === 'success';
-            $isExplicitRejection = in_array(
+            $contradictory = $receiptStatus === 'success';
+            $reverted = $providerError === 'REVERTED'
+                || $receiptStatus === 'failed';
+            $explicit = in_array(
                 $providerError,
                 ['BAD_REQUEST', 'REVERTED'],
                 true
             ) || $receiptStatus === 'failed';
 
             throw new PaymentSponsorshipException(
-                $isExplicitRejection && ! $isContradictory
-                    ? PaymentSponsorshipException::PROVIDER_REJECTED
-                    : PaymentSponsorshipException::PROVIDER_STATUS_UNKNOWN,
-                externalMethod: 'signAsFeePayer'
+                match (true) {
+                    $reverted && ! $contradictory => PaymentSponsorshipException::PROVIDER_REVERTED,
+                    $explicit && ! $contradictory => PaymentSponsorshipException::PROVIDER_REJECTED,
+                    default => PaymentSponsorshipException::PROVIDER_STATUS_UNKNOWN,
+                },
+                externalMethod: 'signAsFeePayer',
+                upstreamStatus: $response->status()
+            );
+        }
+
+        if ($providerStatus === true && $receiptStatus === 'failed') {
+            throw new PaymentSponsorshipException(
+                PaymentSponsorshipException::PROVIDER_REVERTED,
+                externalMethod: 'signAsFeePayer',
+                upstreamStatus: $response->status()
             );
         }
 
         if ($providerStatus !== true
             || ! is_array($data)
-            || (array_key_exists('error', $body)
-                && $providerError !== null)
-            || $receiptStatus === 'unknown') {
-            throw new PaymentSponsorshipException(
-                PaymentSponsorshipException::PROVIDER_STATUS_UNKNOWN,
-                externalMethod: 'signAsFeePayer'
-            );
+            || (array_key_exists('error', $body) && $providerError !== null)
+            || $receiptStatus !== 'success') {
+            throw $this->unknown($response);
         }
 
-        if ($receiptStatus === 'failed') {
-            throw new PaymentSponsorshipException(
-                PaymentSponsorshipException::PROVIDER_REJECTED,
-                externalMethod: 'signAsFeePayer'
-            );
-        }
-
-        $hash = $data['hash']
-            ?? $data['transactionHash']
-            ?? null;
+        $hash = $data['hash'] ?? $data['transactionHash'] ?? null;
 
         if (isset($data['hash'], $data['transactionHash'])
             && strcasecmp(
                 (string) $data['hash'],
                 (string) $data['transactionHash']
             ) !== 0) {
-            throw new PaymentSponsorshipException(
-                PaymentSponsorshipException::PROVIDER_STATUS_UNKNOWN,
-                externalMethod: 'signAsFeePayer'
-            );
+            throw $this->unknown($response);
         }
 
         if (! is_string($hash)
             || preg_match('/\A0x[0-9a-fA-F]{64}\z/', $hash) !== 1) {
-            throw new PaymentSponsorshipException(
-                PaymentSponsorshipException::PROVIDER_STATUS_UNKNOWN,
-                externalMethod: 'signAsFeePayer'
-            );
+            throw $this->unknown($response);
         }
 
-        return strtolower($hash);
+        return new FeeDelegationSubmission(
+            strtolower($hash),
+            $response->status()
+        );
     }
 
+    /** @return array{string, ?string, int} */
     private function configuration(): array
     {
         $url = config('services.fee_delegation.url');
         $apiKey = config('services.fee_delegation.api_key');
         $timeout = config('services.fee_delegation.timeout_seconds');
 
-        if (! FeeDelegationEndpoint::isAllowed($url, $apiKey)
-            || (! is_null($apiKey) && ! is_string($apiKey))
-            || (is_string($apiKey)
-                && (strlen($apiKey) > 4096 || preg_match('/\s/', $apiKey)))
+        $endpointAllowed = $this->managed()
+            ? FeeDelegationEndpoint::isManaged($url, $apiKey)
+            : FeeDelegationEndpoint::isAllowed($url, $apiKey);
+
+        if (! $endpointAllowed
             || (! is_int($timeout) && ! is_string($timeout))
             || preg_match('/\A[0-9]+\z/', (string) $timeout) !== 1
             || (int) $timeout < 1
@@ -174,5 +199,14 @@ class KaiaFeeDelegationGateway implements FeeDelegationGateway
         }
 
         return 'unknown';
+    }
+
+    private function unknown(Response $response): PaymentSponsorshipException
+    {
+        return new PaymentSponsorshipException(
+            PaymentSponsorshipException::PROVIDER_STATUS_UNKNOWN,
+            externalMethod: 'signAsFeePayer',
+            upstreamStatus: $response->status()
+        );
     }
 }

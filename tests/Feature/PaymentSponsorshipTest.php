@@ -2,11 +2,15 @@
 
 namespace Tests\Feature;
 
+use App\Blockchain\NetworkProfileRegistry;
 use App\Models\Payment;
+use App\Models\PaymentFeeDelegationAttempt;
 use App\Models\Staff;
 use App\Models\Store;
 use App\Models\User;
 use App\Models\Wallet;
+use App\Payments\PaymentSnapshot;
+use App\Services\Payments\FeeDelegationAttemptResolver;
 use Illuminate\Database\Events\TransactionBeginning;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
@@ -20,9 +24,13 @@ class PaymentSponsorshipTest extends TestCase
 {
     use RefreshDatabase;
 
+    private array $resolverResults = [];
+
     private const RPC_URL = 'https://rpc.example.test';
 
     private const FEE_DELEGATION_URL = 'https://fee.example.test';
+
+    private const MANAGED_FEE_DELEGATION_URL = 'https://fee-delegation-kairos.kaia.io';
 
     private const LOOPBACK_FEE_PAYER_URL = 'http://127.0.0.1:19000';
 
@@ -51,17 +59,17 @@ class PaymentSponsorshipTest extends TestCase
         parent::setUp();
 
         config([
-            'services.web3.network' => 'kairos',
-            'services.web3.chain_id' => 1001,
-            'services.web3.rpc_url' => self::RPC_URL,
-            'services.web3.erc20_contract_address' => self::TOKEN,
-            'services.web3.token_decimals' => 18,
+            'blockchain.network' => 'kairos',
+            'blockchain.profiles.kairos.chain_id' => 1001,
+            'blockchain.profiles.kairos.rpc_url' => self::RPC_URL,
+            'blockchain.profiles.kairos.jpyc.contract' => self::TOKEN,
+            'blockchain.profiles.kairos.jpyc.decimals' => 18,
             'services.fee_delegation.enabled' => true,
+            'services.fee_delegation.mode' => 'self-hosted',
             'services.fee_delegation.url' => self::FEE_DELEGATION_URL,
             'services.fee_delegation.api_key' => self::API_KEY,
             'services.fee_delegation.max_gas' => 150000,
             'services.fee_delegation.timeout_seconds' => 30,
-            'services.fee_delegation.cache_store' => 'array',
         ]);
 
         Http::preventStrayRequests();
@@ -96,7 +104,7 @@ class PaymentSponsorshipTest extends TestCase
 
         $this->assertPaymentPending($payment);
         $this->assertSame([$baselineLevel, $baselineLevel], $levels);
-        $this->assertSame(0, $transactionsStarted);
+        $this->assertSame(2, $transactionsStarted);
         Http::assertSentCount(2);
         Http::assertSent(function (Request $request) use ($raw): bool {
             return $request->url() === self::RPC_URL
@@ -112,6 +120,12 @@ class PaymentSponsorshipTest extends TestCase
                 && $request->hasHeader('Authorization', 'Bearer '.self::API_KEY)
                 && $request['userSignedTx'] === ['raw' => $raw];
         });
+        $attempt = PaymentFeeDelegationAttempt::where('payment_id', $payment->id)->firstOrFail();
+        $this->assertSame('self-hosted', $attempt->provider);
+        $this->assertSame('submitted', $attempt->state);
+        $this->assertSame(self::TX_HASH, $attempt->tx_hash);
+        $this->assertSame(hash('sha256', strtolower($raw)), $attempt->request_fingerprint);
+        $this->assertMatchesRegularExpression('/\A0x[0-9a-f]{64}\z/', $attempt->sender_tx_hash);
     }
 
     public function test_successful_sponsorship_is_idempotent_for_the_same_sender_transaction(): void
@@ -194,7 +208,7 @@ class PaymentSponsorshipTest extends TestCase
     public function test_official_sdk_sender_signed_transaction_matches_backend_policy(): void
     {
         config([
-            'services.web3.erc20_contract_address' => self::SDK_TOKEN,
+            'blockchain.profiles.kairos.jpyc.contract' => self::SDK_TOKEN,
         ]);
         $payment = $this->createPayment(recipient: self::SDK_RECIPIENT);
         $this->authenticateUser();
@@ -218,6 +232,153 @@ class PaymentSponsorshipTest extends TestCase
 
         $this->assertPaymentPending($payment);
         Http::assertSentCount(2);
+    }
+
+    public function test_managed_gateway_is_selected_explicitly_with_documented_contract(): void
+    {
+        $payment = $this->createPayment();
+        $this->authenticateUser();
+        $raw = $this->senderSignedTransaction($payment->amount);
+        $this->enableManagedLiveTest($payment);
+
+        Http::fake(function (Request $request) {
+            if ($request->url() === self::RPC_URL) {
+                return $this->recoveredSenderResponse();
+            }
+
+            return Http::response([
+                'message' => 'Request was successful',
+                'data' => ['status' => 1, 'hash' => self::TX_HASH],
+                'status' => true,
+            ]);
+        });
+
+        $this->postJson("/api/payments/{$payment->id}/sponsor", [
+            'sender_signed_tx' => $raw,
+        ])->assertExactJson(['transaction_hash' => self::TX_HASH]);
+
+        $this->assertDatabaseHas('payment_fee_delegation_attempts', [
+            'payment_id' => $payment->id,
+            'provider' => 'kaia-managed',
+            'state' => 'submitted',
+        ]);
+        Http::assertSent(fn (Request $request): bool => $request->url() === self::MANAGED_FEE_DELEGATION_URL.'/api/signAsFeePayer'
+            && $request->hasHeader('Authorization', 'Bearer '.self::API_KEY)
+            && $request['userSignedTx'] === ['raw' => $raw]
+        );
+    }
+
+    public function test_managed_gateway_requires_tls_and_api_key(): void
+    {
+        $this->authenticateUser();
+
+        foreach ([
+            ['https://fee.example.test', null],
+            ['http://127.0.0.1:19000', self::API_KEY],
+        ] as $index => [$url, $apiKey]) {
+            $payment = $this->createPayment(suffix: "managed-config-{$index}");
+            config([
+                'services.fee_delegation.mode' => 'kaia-managed',
+                'services.fee_delegation.url' => $url,
+                'services.fee_delegation.api_key' => $apiKey,
+            ]);
+            Http::fake(fn () => $this->recoveredSenderResponse());
+
+            $response = $this->postJson("/api/payments/{$payment->id}/sponsor", [
+                'sender_signed_tx' => $this->senderSignedTransaction($payment->amount),
+            ])->assertInternalServerError();
+
+            $this->assertStringNotContainsString(self::API_KEY, $response->getContent());
+            $this->assertDatabaseMissing('payment_fee_delegation_attempts', [
+                'payment_id' => $payment->id,
+            ]);
+        }
+    }
+
+    public function test_unsupported_mode_fails_closed_and_app_env_does_not_select_provider(): void
+    {
+        $payment = $this->createPayment();
+        $this->authenticateUser();
+        config([
+            'app.env' => 'production',
+            'services.fee_delegation.mode' => 'unsupported',
+        ]);
+        Http::fake(fn () => $this->recoveredSenderResponse());
+
+        $this->postJson("/api/payments/{$payment->id}/sponsor", [
+            'sender_signed_tx' => $this->senderSignedTransaction($payment->amount),
+        ])->assertInternalServerError();
+
+        $this->assertDatabaseMissing('payment_fee_delegation_attempts', [
+            'payment_id' => $payment->id,
+        ]);
+        $this->assertSame('unsupported', config('services.fee_delegation.mode'));
+    }
+
+    public function test_managed_malformed_response_becomes_persistent_unknown_without_retry(): void
+    {
+        $payment = $this->createPayment();
+        $this->authenticateUser();
+        $raw = $this->senderSignedTransaction($payment->amount);
+        $this->enableManagedLiveTest($payment);
+
+        Http::fake(fn (Request $request) => $request->url() === self::RPC_URL
+            ? $this->recoveredSenderResponse()
+            : Http::response([
+                'status' => true,
+                'data' => ['status' => 1, 'hash' => self::TX_HASH],
+            ]));
+
+        foreach ([1, 2] as $ignored) {
+            $this->postJson("/api/payments/{$payment->id}/sponsor", [
+                'sender_signed_tx' => $raw,
+            ])->assertServiceUnavailable();
+        }
+
+        $this->assertDatabaseHas('payment_fee_delegation_attempts', [
+            'payment_id' => $payment->id,
+            'provider' => 'kaia-managed',
+            'state' => 'unknown_submission',
+            'diagnostic_code' => 'provider_status_unknown',
+        ]);
+        $this->assertSame(1, $this->feePayerRequestCount());
+    }
+
+    public function test_managed_ambiguous_http_statuses_are_not_treated_as_safe_to_retry(): void
+    {
+        $this->authenticateUser();
+        $statuses = [409, 429, 500];
+        $providerStatuses = $statuses;
+
+        Http::fake(function (Request $request) use (&$providerStatuses) {
+            if ($request->url() === self::RPC_URL) {
+                return $this->recoveredSenderResponse();
+            }
+
+            return Http::response([
+                'message' => 'Provider state is not authoritative',
+                'status' => false,
+                'error' => 'INTERNAL_ERROR',
+            ], array_shift($providerStatuses));
+        });
+
+        foreach ($statuses as $index => $status) {
+            $payment = $this->createPayment(suffix: "managed-http-{$status}");
+            $this->enableManagedLiveTest($payment);
+
+            $this->postJson("/api/payments/{$payment->id}/sponsor", [
+                'sender_signed_tx' => $this->senderSignedTransaction(
+                    $payment->amount,
+                    nonce: (string) ($index + 20)
+                ),
+            ])->assertServiceUnavailable();
+
+            $this->assertDatabaseHas('payment_fee_delegation_attempts', [
+                'payment_id' => $payment->id,
+                'state' => 'unknown_submission',
+                'provider_http_status' => $status,
+            ]);
+        }
     }
 
     public function test_kairos_service_can_be_called_without_optional_api_key(): void
@@ -397,7 +558,7 @@ class PaymentSponsorshipTest extends TestCase
     {
         $payment = $this->createPayment();
         $this->authenticateUser();
-        config(['services.web3.network' => 'kaia-mainnet']);
+        config(['blockchain.network' => 'kaia-mainnet']);
 
         $this->postJson("/api/payments/{$payment->id}/sponsor", [
             'sender_signed_tx' => $this->senderSignedTransaction(
@@ -726,20 +887,14 @@ class PaymentSponsorshipTest extends TestCase
         Http::assertSentCount(2);
     }
 
-    public function test_explicit_reverted_fee_payer_response_releases_reservation(): void
+    public function test_explicit_reverted_fee_payer_response_is_not_resubmitted(): void
     {
         $payment = $this->createPayment();
         $this->authenticateUser();
-        $responses = [
-            Http::response([
-                'status' => true,
-                'data' => ['status' => 0, 'hash' => self::TX_HASH],
-            ]),
-            Http::response([
-                'status' => true,
-                'data' => ['status' => 1, 'hash' => self::TX_HASH],
-            ]),
-        ];
+        $responses = [Http::response([
+            'status' => true,
+            'data' => ['status' => 0, 'hash' => self::TX_HASH],
+        ])];
         $index = 0;
 
         Http::fake(function (Request $request) use (&$index, $responses) {
@@ -758,12 +913,17 @@ class PaymentSponsorshipTest extends TestCase
             ->assertStatus(502)
             ->assertExactJson(['error' => 'Fee sponsorship rejected']);
         $this->postJson("/api/payments/{$payment->id}/sponsor", $payload)
-            ->assertOk()
-            ->assertExactJson(['transaction_hash' => self::TX_HASH]);
+            ->assertStatus(502)
+            ->assertExactJson(['error' => 'Fee sponsorship rejected']);
 
         $this->assertPaymentPending($payment);
-        Http::assertSentCount(4);
-        $this->assertSame(2, $this->feePayerRequestCount());
+        Http::assertSentCount(3);
+        $this->assertSame(1, $this->feePayerRequestCount());
+        $this->assertDatabaseHas('payment_fee_delegation_attempts', [
+            'payment_id' => $payment->id,
+            'state' => 'reverted',
+            'diagnostic_code' => 'transaction_reverted',
+        ]);
     }
 
     public function test_malformed_fee_payer_response_blocks_duplicate_submission(): void
@@ -831,7 +991,8 @@ class PaymentSponsorshipTest extends TestCase
 
             $this->postJson("/api/payments/{$payment->id}/sponsor", [
                 'sender_signed_tx' => $this->senderSignedTransaction(
-                    $payment->amount
+                    $payment->amount,
+                    nonce: (string) ($case + 1)
                 ),
             ])
                 ->assertServiceUnavailable()
@@ -899,6 +1060,75 @@ class PaymentSponsorshipTest extends TestCase
         Http::assertSentCount(2);
     }
 
+    public function test_unknown_resolver_not_found_does_not_resubmit(): void
+    {
+        [$payment, $attempt] = $this->createUnknownAttempt();
+
+        $this->resolverResults = [true, null, null];
+
+        $result = app(FeeDelegationAttemptResolver::class)->resolve($attempt);
+
+        $this->assertSame(FeeDelegationAttemptResolver::NOT_FOUND, $result);
+        $this->assertDatabaseHas('payment_fee_delegation_attempts', [
+            'payment_id' => $payment->id,
+            'state' => 'unknown_submission',
+            'diagnostic_code' => 'sender_tx_not_found',
+        ]);
+        Http::assertSentCount(5);
+        $this->assertSame(1, $this->feePayerRequestCount());
+    }
+
+    public function test_unknown_resolver_finds_full_transaction_without_broadcasting(): void
+    {
+        [$payment, $attempt] = $this->createUnknownAttempt();
+        $atomicHex = gmp_strval(gmp_init('1000000000000000000', 10), 16);
+        $expectedInput = '0xa9059cbb'.str_repeat('0', 24)
+            .substr(self::RECIPIENT, 2)
+            .str_pad($atomicHex, 64, '0', STR_PAD_LEFT);
+
+        $this->resolverResults = [
+            true,
+            [
+                'hash' => self::TX_HASH,
+                'senderTxHash' => $attempt->sender_tx_hash,
+                'from' => self::SENDER,
+                'to' => self::TOKEN,
+                'input' => $expectedInput,
+                'value' => '0x0',
+                'nonce' => '0x1',
+                'type' => 'TxTypeFeeDelegatedSmartContractExecution',
+                'typeInt' => 49,
+            ],
+            null,
+        ];
+
+        $result = app(FeeDelegationAttemptResolver::class)->resolve($attempt);
+
+        $this->assertSame(FeeDelegationAttemptResolver::SUBMITTED, $result);
+        $this->assertDatabaseHas('payment_fee_delegation_attempts', [
+            'payment_id' => $payment->id,
+            'state' => 'submitted',
+            'tx_hash' => self::TX_HASH,
+            'diagnostic_code' => 'receipt_pending',
+        ]);
+        Http::assertSentCount(5);
+    }
+
+    public function test_unknown_resolver_transport_failure_preserves_unknown(): void
+    {
+        [$payment, $attempt] = $this->createUnknownAttempt();
+        $this->resolverResults = ['connection_failure'];
+
+        $result = app(FeeDelegationAttemptResolver::class)->resolve($attempt);
+
+        $this->assertSame(FeeDelegationAttemptResolver::TRANSIENT_FAILURE, $result);
+        $this->assertDatabaseHas('payment_fee_delegation_attempts', [
+            'payment_id' => $payment->id,
+            'state' => 'unknown_submission',
+            'diagnostic_code' => 'sender_tx_lookup_unavailable',
+        ]);
+    }
+
     private function createPayment(
         array $overrides = [],
         string $recipient = self::RECIPIENT,
@@ -922,13 +1152,72 @@ class PaymentSponsorshipTest extends TestCase
             'network' => 'kairos',
         ]);
 
-        return Payment::create(array_merge([
+        $attributes = array_merge([
             'store_id' => $store->id,
             'staff_id' => $staff->id,
             'amount' => 1,
             'status' => 'pending',
             'expires_at' => now()->addMinutes(10),
-        ], $overrides));
+        ], $overrides);
+
+        if ($attributes['expires_at'] === null) {
+            return Payment::create($attributes);
+        }
+
+        $snapshot = PaymentSnapshot::create(
+            app(NetworkProfileRegistry::class)->get('kairos'),
+            $recipient,
+            $attributes['amount'],
+            $attributes['expires_at']
+        );
+
+        return Payment::create(array_merge(
+            $attributes,
+            $snapshot->databaseAttributes(),
+            $overrides
+        ));
+    }
+
+    /** @return array{Payment, PaymentFeeDelegationAttempt} */
+    private function createUnknownAttempt(): array
+    {
+        $payment = $this->createPayment(suffix: uniqid('resolver-', true));
+        $this->authenticateUser();
+        Http::fake(function (Request $request) {
+            if ($request->url() === self::RPC_URL) {
+                if ($request['method'] === 'kaia_recoverFromTransaction') {
+                    return $this->recoveredSenderResponse();
+                }
+
+                $result = array_shift($this->resolverResults);
+
+                if ($result === 'connection_failure') {
+                    return (Http::failedConnection('redacted RPC failure'))($request);
+                }
+
+                return Http::response([
+                    'jsonrpc' => '2.0',
+                    'id' => 1,
+                    'result' => $result,
+                ]);
+            }
+
+            return Http::response([
+                'status' => false,
+                'error' => 'INTERNAL_ERROR',
+            ], 500);
+        });
+
+        $this->postJson("/api/payments/{$payment->id}/sponsor", [
+            'sender_signed_tx' => $this->senderSignedTransaction($payment->amount),
+        ])->assertServiceUnavailable();
+
+        Http::assertSentCount(2);
+
+        return [
+            $payment,
+            PaymentFeeDelegationAttempt::where('payment_id', $payment->id)->firstOrFail(),
+        ];
     }
 
     private function authenticateUser(): User
@@ -975,8 +1264,20 @@ class PaymentSponsorshipTest extends TestCase
     {
         return Http::recorded(
             fn (Request $request): bool => $request->url()
-                === self::FEE_DELEGATION_URL.'/api/signAsFeePayer'
+                === rtrim((string) config('services.fee_delegation.url'), '/')
+                    .'/api/signAsFeePayer'
         )->count();
+    }
+
+    private function enableManagedLiveTest(Payment $payment): void
+    {
+        config([
+            'services.fee_delegation.mode' => 'kaia-managed',
+            'services.fee_delegation.url' => self::MANAGED_FEE_DELEGATION_URL,
+            'services.fee_delegation.kairos_managed_live_test_enabled' => true,
+            'services.fee_delegation.kairos_managed_live_test_payment_id' => $payment->id,
+            'services.fee_delegation.kairos_managed_live_test_max_jpy' => 1,
+        ]);
     }
 
     private function senderSignedTransaction(

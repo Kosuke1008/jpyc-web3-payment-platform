@@ -10,6 +10,7 @@ final readonly class SponsoredTransfer
         public string $tokenContract,
         public string $recipient,
         public string $atomicAmount,
-        public string $gasLimit
+        public string $gasLimit,
+        public string $nonce
     ) {}
 }
