@@ -35,6 +35,14 @@ class PaymentSponsorshipException extends RuntimeException
 
     public const PROVIDER_REVERTED = 'provider_reverted';
 
+    public const KILL_SWITCH_ACTIVE = 'kill_switch_active';
+
+    public const POLICY_REJECTED = 'policy_rejected';
+
+    public const BUDGET_EXCEEDED = 'budget_exceeded';
+
+    public const RATE_LIMITED = 'rate_limited';
+
     public function __construct(
         public readonly string $reason,
         public readonly ?string $externalMethod = null,

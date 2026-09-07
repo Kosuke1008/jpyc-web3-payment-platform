@@ -73,6 +73,16 @@ class PaymentSponsorshipController extends Controller
             PaymentSponsorshipException::PROVIDER_STATUS_UNKNOWN => [
                 'Fee sponsorship status is unknown', 503,
             ],
+            PaymentSponsorshipException::RATE_LIMITED => [
+                'Fee sponsorship rate limit exceeded', 429,
+            ],
+            PaymentSponsorshipException::POLICY_REJECTED => [
+                'Fee sponsorship policy rejected', 400,
+            ],
+            PaymentSponsorshipException::KILL_SWITCH_ACTIVE,
+            PaymentSponsorshipException::BUDGET_EXCEEDED => [
+                'Fee sponsorship is unavailable', 503,
+            ],
             PaymentSponsorshipException::DISABLED,
             PaymentSponsorshipException::RPC_UNAVAILABLE,
             PaymentSponsorshipException::PROVIDER_UNAVAILABLE => [

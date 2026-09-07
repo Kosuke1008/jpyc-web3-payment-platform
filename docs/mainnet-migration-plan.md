@@ -1,7 +1,7 @@
 # LivT Kaia Mainnet移行設計
 
 最終更新: 2026-09-07
-状態: Phase 1〜6実装済み、Phase 7 live Kairos managed test準備済み。live送信未実施、Mainnet実行は無効
+状態: Phase 1〜8実装済み、Phase 9 Mainnet staging read-only準備済み。Mainnet実行は無効
 
 ## 0. 目的と結論
 
@@ -582,6 +582,30 @@ Mainnet三重gate falseをすべて要求する。readinessはSenderTxHash index
 attemptを作らずsender-signed RLPとPayment snapshotを照合する。手順と停止条件は
 [`kairos-managed-live-test-runbook.md`](kairos-managed-live-test-runbook.md)に固定する。
 
+### 6.8 Phase 8: self-hosted first-pilot direction
+
+初回の限定Mainnet pilotはself-hosted LivT Fee Payerを優先する。Managed Serviceは将来のoptional providerとして
+残すが、自動fallbackには使用しない。Fee PayerはKairos local signerをinterface配下へ隔離し、Mainnetではexternal
+signer addressの構造検証だけを行い、signer implementationとexecution/broadcastを提供しない。
+
+Mainnetは専用primary RPC、optional read-only secondary、別wallet、最低reserve、kill switchを要求する。Laravelは
+DB attempt ledgerを永続的なidempotency/rate/budget正本として維持する。運用正本は
+[`self-hosted-mainnet-fee-payer-runbook.md`](self-hosted-mainnet-fee-payer-runbook.md)である。
+
+### 6.9 Phase 9: Mainnet staging read-only preparation
+
+Mainnet staging用のDB/cache/RPC/merchant/Fee Payer identity/allowlist分離を設定化し、
+`blockchain:mainnet-staging-readiness`でPlatform、Fee Payer、RPC、JPYC、DB migration、shared lock、
+balance、signer unavailable、kill switch、execution gateを集約する。正常状態は
+`READ_ONLY_READY / SIGNING NOT_READY / BROADCAST DISABLED`である。
+
+Fee PayerのMainnet staging entry pointはread-only healthだけをlocalhostで提供する。external signerは
+unavailable実装のままで署名できない。Stage 2 hardeningはlegacy policy未解決DBではblockedとして表示し、
+空の専用Mainnet DBではmigration順序とpreflightにより安全性を確認する。
+
+運用詳細は[`mainnet-staging-runbook.md`](mainnet-staging-runbook.md)を正本とする。Phase 9ではMainnet
+gateを変更せず、Fee Payerへ入金せず、Managed/self-hosted間のfallbackを追加しない。
+
 ## 7. Mainnet safety boundary
 
 | 領域 | 分離方針 |
@@ -693,7 +717,9 @@ Mainnet接続を有効にする前に、以下をKairos、RPC stub、isolated DB
 
 ## 9. 推奨実装順序
 
-実装状況: Phase 1（Network Profile）、Phase 2（Payment Snapshot）、Phase 3（Confirmation Evidence / Finality）、Phase 4（Database Hardening / Mainnet Read-only Readiness）は完了。Phase 5でKaia managed serviceを選択し、Phase 6でLaravel managed adapter、DB attempt ledger、SenderTxHash resolverを実装した。Phase 7では1件・最大1 JPYCのlive Kairos managed試験をreadiness/dry-run/runbookまで準備したが、live送信は未実施である。Stage 2 DDLはlegacy監査合格後にだけ実行可能であり、継続scheduler、production budget/rate monitoring、外部API契約確認、Mainnet実行は未完了である。
+実装状況: Phase 1〜8に続き、Phase 9で専用DB/cache/RPC/identity/allowlistと集約readinessを準備した。
+Managed Serviceはoptional providerとして残る。Mainnet execution/signing/broadcast、external signer実装、
+実staging infrastructureへの設定投入、実送信は未完了である。
 
 1. この設計とnetwork ID、整数JPY、第三者支払い方針をレビュー確定する。
 2. 3リポジトリへnetwork profile value object/registryを追加する。Mainnet送信は無効のまま。
@@ -709,6 +735,8 @@ Mainnet接続を有効にする前に、以下をKairos、RPC stub、isolated DB
 12. Laravelへmanaged adapter、persistent attempt ledger、SenderTxHash reconciliationを実装する。Mainnet実行は無効のまま試験する。（Phase 6実装済み）
 13. live-test gate、1 Payment固定、1 JPYC上限、SenderTxHash indexing readiness、pure dry runを準備する。（Phase 7実装済み、live未実施）
 14. security reviewと運用演習後、別途承認された1 JPYC Kairos試験へ進む。
+15. self-hosted Mainnet signer/RPC/budget運用をstagingで検証し、独立承認後だけ1 JPYC Mainnet pilotへ進む。
+    （Phase 9はread-only構成・観測モデルのみ完了）
 
 ## 10. Rollback
 

@@ -106,6 +106,7 @@ class KaiaFeeDelegatedTransactionInspector implements FeeDelegatedTransactionIns
                 10
             ),
             gasLimit: $gasLimit,
+            gasPrice: $gasPriceValue,
             nonce: $nonceValue
         );
     }

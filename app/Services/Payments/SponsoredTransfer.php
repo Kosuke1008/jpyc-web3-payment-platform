@@ -11,6 +11,7 @@ final readonly class SponsoredTransfer
         public string $recipient,
         public string $atomicAmount,
         public string $gasLimit,
+        public string $gasPrice,
         public string $nonce
     ) {}
 }

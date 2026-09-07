@@ -1,23 +1,23 @@
 # LivT Mainnet Fee Delegationアーキテクチャ決定
 
 最終更新: 2026-09-07
-状態: Phase 7 live Kairos managed test準備済み。live送信・外部利用申請・Mainnet接続は未実施
+状態: Phase 9 Mainnet staging read-only準備済み。Mainnet実行・署名・broadcastは未実施
 
 ## 1. 決定
 
-Mainnetの初期one-store pilotには、**A: Kaia公式Fee Delegation Service**を採用する。
+Mainnetの初期one-store pilotには、**B: self-hosted LivT Fee Payer**を優先する。
 
-- Kaia managed serviceはfee-payer署名とbroadcastだけを担当する。
+- Kaia managed serviceは将来の明示選択可能なoptional providerとして維持する。
 - LaravelはPaymentの正本、sender-signed transactionのpolicy gateway、最終chain evidence検証を担当し続ける。
 - Walletはユーザー鍵を端末内に保持し、現在と同じsender-signed RLPを生成する。
-- `livt-fee-payer`は削除せず、Kairosの開発・回帰試験用として残す。Mainnet fallbackにはしない。
-- Mainnet execution flagは、Phase 5では変更しない。
+- `livt-fee-payer`はKairos互換性を維持しつつ、Mainnetではexternal signer境界を使用する。
+- Mainnet execution flagは、Phase 9でも変更しない。
 
 Hybrid/fallbackは採用しない。結果不明時に別providerへfallbackすると、同じnonceの異なる
 fee-payer署名済みtransactionを二重送信する危険があり、鍵・台帳・監視も二重化するためである。
 
-この決定は「すぐ接続可能」という意味ではない。Kaiaへの利用申請時に第14節の不明点を解消し、
-永続attempt ledgerとunknown submission回復を実装・検証してから、別承認で接続する。
+この決定は「すぐ実行可能」という意味ではない。Phase 9ではread-only stagingだけを準備し、external
+signer、永続attempt ledger、unknown submission回復、運用監視を検証してから別承認で有効化する。
 
 ## 2. 公式サービスの現行契約
 
@@ -376,3 +376,19 @@ Phase 7ではlive callを行わず、次のfail-closedな準備だけを追加�
 公式managed service資料はfee-delegated transaction一般とvalue transfer例を示すが、type `0x31` JPYC
 `transfer()`の対応を明記していない。将来の1回のKairos試験を互換性検証とし、再送やprovider fallbackを
 行わない。operator手順は[`kairos-managed-live-test-runbook.md`](kairos-managed-live-test-runbook.md)を正本とする。
+
+## 19. Phase 8 pilot direction
+
+初回の限定Mainnet pilotは既存LivT self-hosted Fee Payerを優先する。Laravelのattempt ledgerとpolicyを正本にし、
+signer、primary broadcast RPC、budget、kill switchをLivTの運用境界で制御する。Managed Service adapterは将来の
+明示的なprovider選択肢として維持し、どちらの方向にも自動fallbackしない。
+
+Mainnet profileはexecution/signing/broadcast=falseを維持する。Phase 8ではexternal signer abstraction、
+wallet/RPC分離、balance readiness、production artifact分離、LaravelのDB-backed rate/budget policyまでを実装した。
+詳細は[`self-hosted-mainnet-fee-payer-runbook.md`](self-hosted-mainnet-fee-payer-runbook.md)を参照する。
+
+## 20. Phase 9 read-only staging
+
+専用DB/cache/RPC/merchant/Fee Payer identityとpilot allowlistを設定化し、Laravelの集約readinessとFee Payer
+localhost healthを追加した。正常状態は`READ_ONLY_READY / SIGNING NOT_READY / BROADCAST DISABLED`である。
+運用手順は[`mainnet-staging-runbook.md`](mainnet-staging-runbook.md)を正本とする。

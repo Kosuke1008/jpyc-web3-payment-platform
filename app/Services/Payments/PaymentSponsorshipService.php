@@ -19,7 +19,8 @@ class PaymentSponsorshipService
         private readonly FeeDelegationGateway $gateway,
         private readonly NetworkProfileRegistry $networks,
         private readonly KaiaSenderTransactionHash $senderTransactionHash,
-        private readonly ManagedKairosLiveTestPolicy $managedLiveTestPolicy
+        private readonly ManagedKairosLiveTestPolicy $managedLiveTestPolicy,
+        private readonly SelfHostedMainnetSponsorshipPolicy $mainnetPolicy
     ) {}
 
     public function sponsor(
@@ -58,14 +59,21 @@ class PaymentSponsorshipService
             $senderSignedTransaction
         );
 
-        [$attempt, $knownHash] = $this->reserveAttempt(
+        [$attempt, $knownHash] = $this->mainnetPolicy->run(
             $payment,
             $snapshot,
             $transfer,
             $provider,
-            $fingerprint,
-            $senderTxHash,
-            $requesterUserId
+            $requesterUserId,
+            fn (): array => $this->reserveAttempt(
+                $payment,
+                $snapshot,
+                $transfer,
+                $provider,
+                $fingerprint,
+                $senderTxHash,
+                $requesterUserId
+            )
         );
 
         if ($knownHash !== null) {
