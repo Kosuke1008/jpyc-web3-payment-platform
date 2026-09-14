@@ -25,6 +25,9 @@ class SelfHostedMainnetSponsorshipPolicyTest extends TestCase
         parent::setUp();
 
         config([
+            'blockchain.mainnet_activation_release_capable' => true,
+            'blockchain.profiles.kaia-mainnet.payment_execution_enabled' => true,
+            'blockchain.profiles.kaia-mainnet.fee_delegation_execution_enabled' => true,
             'blockchain.profiles.kaia-mainnet.rpc_url' => 'https://mainnet.example.test',
             'blockchain.payments_mainnet_enabled' => true,
             'blockchain.mainnet_fee_delegation_enabled' => true,
@@ -39,8 +42,8 @@ class SelfHostedMainnetSponsorshipPolicyTest extends TestCase
                 'max_attempts_per_user' => 1,
                 'max_attempts_per_store' => 1,
                 'max_attempts_per_sender' => 1,
-                'max_attempts_global' => 5,
-                'daily_transaction_limit' => 10,
+                'max_attempts_global' => 1,
+                'daily_transaction_limit' => 1,
                 'daily_kaia_budget' => '1',
                 'minimum_reserve_kaia' => '0.2',
             ],
@@ -49,7 +52,7 @@ class SelfHostedMainnetSponsorshipPolicyTest extends TestCase
                 'kairos_merchant_address' => '0x4444444444444444444444444444444444444444',
                 'fee_payer_address' => '0x5555555555555555555555555555555555555555',
                 'kairos_fee_payer_address' => '0x6666666666666666666666666666666666666666',
-                'approved_user_ids' => '1',
+                'approved_user_ids' => '',
                 'approved_sender_addresses' => '0x3333333333333333333333333333333333333333',
                 'allow_cross_environment_reuse' => false,
             ],
@@ -201,6 +204,9 @@ class SelfHostedMainnetSponsorshipPolicyTest extends TestCase
             'email' => "policy-{$suffix}@example.test",
             'password' => 'not-used',
         ]);
+        config([
+            'services.fee_delegation.mainnet_staging.approved_user_ids' => (string) $user->id,
+        ]);
         $expiresAt = now()->addMinutes(10);
         $snapshot = PaymentSnapshot::create(
             app(NetworkProfileRegistry::class)->get('kaia-mainnet'),
@@ -215,6 +221,9 @@ class SelfHostedMainnetSponsorshipPolicyTest extends TestCase
             'status' => 'pending',
             'expires_at' => $expiresAt,
         ], $snapshot->databaseAttributes()));
+        config([
+            'services.fee_delegation.mainnet_staging.pilot_payment_id' => $payment->id,
+        ]);
 
         return [$payment, $user];
     }

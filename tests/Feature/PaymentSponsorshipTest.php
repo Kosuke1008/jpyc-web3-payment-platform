@@ -18,6 +18,8 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Laravel\Sanctum\Sanctum;
+use Tests\Support\ConfirmedPaymentAttributes;
+use Tests\Support\LegacyPaymentTable;
 use Tests\TestCase;
 
 class PaymentSponsorshipTest extends TestCase
@@ -77,6 +79,12 @@ class PaymentSponsorshipTest extends TestCase
         if (DB::getDriverName() === 'sqlite') {
             DB::statement('PRAGMA ignore_check_constraints = ON');
         }
+    }
+
+    protected function tearDown(): void
+    {
+        LegacyPaymentTable::drop();
+        parent::tearDown();
     }
 
     public function test_valid_transaction_is_sponsored_without_finalizing_payment(): void
@@ -344,6 +352,40 @@ class PaymentSponsorshipTest extends TestCase
         $this->assertSame(1, $this->feePayerRequestCount());
     }
 
+    public function test_explicit_self_hosted_signer_timeout_is_failed_before_broadcast(): void
+    {
+        $payment = $this->createPayment();
+        $this->authenticateUser();
+        $raw = $this->senderSignedTransaction($payment->amount);
+
+        Http::fake(fn (Request $request) => $request->url() === self::RPC_URL
+            ? $this->recoveredSenderResponse()
+            : Http::response([
+                'status' => false,
+                'error' => 'SIGNER_TIMEOUT',
+            ], 503));
+
+        $this->postJson("/api/payments/{$payment->id}/sponsor", [
+            'sender_signed_tx' => $raw,
+        ])
+            ->assertServiceUnavailable()
+            ->assertExactJson([
+                'error' => 'Fee sponsorship signer is unavailable',
+            ]);
+
+        $this->assertDatabaseHas('payment_fee_delegation_attempts', [
+            'payment_id' => $payment->id,
+            'state' => 'failed',
+            'diagnostic_code' => 'signer_timeout',
+            'provider_http_status' => 503,
+        ]);
+        $attempt = PaymentFeeDelegationAttempt::where('payment_id', $payment->id)
+            ->firstOrFail();
+        $this->assertNotNull($attempt->resolved_at);
+        $this->assertNull($attempt->tx_hash);
+        $this->assertSame(1, $this->feePayerRequestCount());
+    }
+
     public function test_managed_ambiguous_http_statuses_are_not_treated_as_safe_to_retry(): void
     {
         $this->authenticateUser();
@@ -591,6 +633,7 @@ class PaymentSponsorshipTest extends TestCase
 
     public function test_payment_without_expiry_is_not_sponsored(): void
     {
+        LegacyPaymentTable::create();
         $payment = $this->createPayment(['expires_at' => null]);
         $this->authenticateUser();
 
@@ -608,7 +651,7 @@ class PaymentSponsorshipTest extends TestCase
 
     public function test_confirmed_payment_is_rejected_before_external_access(): void
     {
-        $payment = $this->createPayment(['status' => 'confirmed']);
+        $payment = $this->createPayment(['status' => 'confirmed'] + ConfirmedPaymentAttributes::forChain(1001));
         $this->authenticateUser();
 
         $this->postJson("/api/payments/{$payment->id}/sponsor", [

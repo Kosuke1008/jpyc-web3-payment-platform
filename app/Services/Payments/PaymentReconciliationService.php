@@ -7,7 +7,6 @@ use App\Models\Payment;
 use App\Payments\InvalidPaymentSnapshotException;
 use App\Payments\PaymentConfirmationEvidence;
 use App\Payments\PaymentSnapshot;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Throwable;
 
@@ -101,23 +100,12 @@ final class PaymentReconciliationService
         string $status,
         ?string $errorCode
     ): string {
-        if ($payment !== null) {
-            DB::table('payments')
-                ->where('id', $payment->id)
-                ->where('status', 'confirmed')
-                ->update([
-                    'reconciliation_status' => $status,
-                    'reconciliation_error_code' => $errorCode,
-                    'reconciled_at' => now(),
-                ]);
-
-            if ($status !== self::VERIFIED) {
-                Log::warning('Payment reconciliation requires attention.', [
-                    'payment_id' => $payment->id,
-                    'reconciliation_status' => $status,
-                    'diagnostic_code' => $errorCode,
-                ]);
-            }
+        if ($payment !== null && $status !== self::VERIFIED) {
+            Log::warning('Payment reconciliation requires attention.', [
+                'payment_id' => $payment->id,
+                'reconciliation_status' => $status,
+                'diagnostic_code' => $errorCode,
+            ]);
         }
 
         return $status;

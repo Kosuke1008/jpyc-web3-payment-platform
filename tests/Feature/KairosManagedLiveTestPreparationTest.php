@@ -16,6 +16,7 @@ use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Laravel\Sanctum\Sanctum;
+use Tests\Support\LegacyPaymentTable;
 use Tests\TestCase;
 
 class KairosManagedLiveTestPreparationTest extends TestCase
@@ -61,6 +62,12 @@ class KairosManagedLiveTestPreparationTest extends TestCase
         if (DB::getDriverName() === 'sqlite') {
             DB::statement('PRAGMA ignore_check_constraints = ON');
         }
+    }
+
+    protected function tearDown(): void
+    {
+        LegacyPaymentTable::drop();
+        parent::tearDown();
     }
 
     public function test_valid_kairos_managed_readiness_is_read_only_and_redacted(): void
@@ -190,6 +197,7 @@ class KairosManagedLiveTestPreparationTest extends TestCase
 
     public function test_dry_run_rejects_incomplete_snapshot(): void
     {
+        LegacyPaymentTable::create();
         $payment = $this->createPayment(incomplete: true);
         $this->selectPayment($payment);
 

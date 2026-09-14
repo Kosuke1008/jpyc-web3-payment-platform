@@ -72,10 +72,10 @@ return new class extends Migration
                     OR (
                         observed_chain_id > 0
                         AND observed_chain_id = chain_id
-                        AND tx_hash REGEXP BINARY '^0x[0-9a-f]{64}$'
+                        AND REGEXP_LIKE(tx_hash, '^0x[0-9a-f]{64}$', 'c')
                         AND confirmed_block_number > 0
-                        AND confirmed_block_hash REGEXP BINARY '^0x[0-9a-f]{64}$'
-                        AND payer_address REGEXP BINARY '^0x[0-9a-f]{40}$'
+                        AND confirmed_block_hash REGEXP '^0x[0-9a-f]{64}$'
+                        AND payer_address REGEXP '^0x[0-9a-f]{40}$'
                         AND payer_address <> '0x0000000000000000000000000000000000000000'
                         AND reconciliation_status IN ('pending', 'verified', 'anomaly', 'transient_failure')
                     )
@@ -90,7 +90,7 @@ return new class extends Migration
                         reconciliation_status IN ('pending', 'verified', 'anomaly', 'transient_failure')
                         AND (
                             reconciliation_error_code IS NULL
-                            OR reconciliation_error_code REGEXP BINARY '^[a-z0-9_]{1,64}$'
+                            OR reconciliation_error_code REGEXP '^[a-z0-9_]{1,64}$'
                         )
                     )
                 )

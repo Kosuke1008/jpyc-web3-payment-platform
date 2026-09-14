@@ -134,6 +134,19 @@ class NetworkProfileRegistryTest extends TestCase
         (new NetworkProfileRegistry($configuration))->active();
     }
 
+    public function test_mainnet_profile_is_executable_only_with_release_capability(): void
+    {
+        $configuration = $this->configuration('kaia-mainnet');
+        $configuration['mainnet_activation_release_capable'] = true;
+        $configuration['profiles']['kaia-mainnet']['payment_execution_enabled'] = true;
+        $configuration['profiles']['kaia-mainnet']['fee_delegation_execution_enabled'] = true;
+
+        $profile = (new NetworkProfileRegistry($configuration))->active();
+
+        $this->assertTrue($profile->paymentExecutionEnabled);
+        $this->assertTrue($profile->feeDelegationExecutionEnabled);
+    }
+
     /** @return array<string, mixed> */
     private function configuration(mixed $network): array
     {
@@ -171,6 +184,7 @@ class NetworkProfileRegistryTest extends TestCase
 
         return [
             'network' => $network,
+            'mainnet_activation_release_capable' => false,
             'payments_mainnet_enabled' => false,
             'profiles' => [
                 'kairos' => $profile(

@@ -22,7 +22,7 @@ final class MainnetStagingReadinessChecker
         private readonly MainnetStagingInfrastructure $infrastructure,
     ) {}
 
-    public function check(): MainnetStagingReadinessReport
+    public function check(bool $readOnly = false): MainnetStagingReadinessReport
     {
         $checks = [];
         $context = [];
@@ -53,8 +53,10 @@ final class MainnetStagingReadinessChecker
             $checks,
             'execution_gates',
             $profile !== null
-                && ! $profile->paymentExecutionEnabled
-                && ! $profile->feeDelegationExecutionEnabled
+                && $profile->paymentExecutionEnabled
+                    === (config('blockchain.mainnet_activation_release_capable') === true)
+                && $profile->feeDelegationExecutionEnabled
+                    === (config('blockchain.mainnet_activation_release_capable') === true)
                 && config('blockchain.payments_mainnet_enabled') === false
                 && config('blockchain.mainnet_fee_delegation_enabled') === false
                 && config('blockchain.mainnet_broadcast_enabled') === false
@@ -127,7 +129,11 @@ final class MainnetStagingReadinessChecker
                     : 'blocked_pending_legacy_policy'),
         ];
 
-        $cache = $this->infrastructure->cacheLock();
+        // Lock acquisition mutates Redis/database state. Pilot dry-runs inspect the
+        // already-proven cache configuration and never acquire a probe lock.
+        $cache = $readOnly
+            ? $this->infrastructure->cacheConfiguration()
+            : $this->infrastructure->cacheLock();
         $stagingPrefix = $configuration['cache_prefix'] ?? null;
         $kairosPrefix = $configuration['kairos_cache_prefix'] ?? null;
         $this->record(
@@ -176,11 +182,17 @@ final class MainnetStagingReadinessChecker
             $configuration['fee_payer_health_url'] ?? null
         );
         $healthReady = is_array($health)
-            && ($health['status'] ?? null) === 'STRUCTURALLY_READY'
+            && in_array($health['status'] ?? null, ['READ_ONLY_READY', 'READY'], true)
+            && (($health['status'] ?? null) !== 'READY'
+                || (config('blockchain.mainnet_activation_release_capable') === true
+                    && ($health['activation_release_capable'] ?? null) === true))
             && ($health['network'] ?? null) === 'kaia-mainnet'
             && ($health['chain_id'] ?? null) === 8217
             && $this->address($health['fee_payer_address'] ?? null) === $feePayer
-            && ($health['signer_status'] ?? null) === 'UNAVAILABLE'
+            && ($health['signer_status'] ?? null) === 'SIGNER_READY'
+            && ($health['signer_type'] ?? null) === 'aws-kms'
+            && is_string($health['signer_key_reference'] ?? null)
+            && preg_match('/\Asha256:[0-9a-f]{16}\z/', $health['signer_key_reference']) === 1
             && ($health['kill_switch'] ?? null) === 'ACTIVE'
             && ($health['execution'] ?? null) === 'DISABLED'
             && ($health['signing'] ?? null) === 'DISABLED'
@@ -199,6 +211,23 @@ final class MainnetStagingReadinessChecker
         }
         if (is_array($health) && is_string($health['balance_kaia'] ?? null)) {
             $context['fee_payer_balance_kaia'] = $health['balance_kaia'];
+        }
+        // Only public, bounded pilot policy fields cross into operator diagnostics.
+        $policy = is_array($health) ? ($health['pilot_policy'] ?? null) : null;
+        if (is_array($policy)) {
+            $publicPolicy = array_intersect_key($policy, array_flip([
+                'ready', 'max_payment_jpyc', 'max_gas', 'max_gas_price_wei', 'rate_window_seconds',
+                'max_attempts_per_user', 'max_attempts_per_store', 'max_attempts_per_sender',
+                'max_attempts_global', 'daily_transaction_limit', 'daily_kaia_budget_wei',
+                'minimum_reserve_wei', 'maximum_balance_wei', 'merchant_address', 'sender_address', 'pilot_payment_id',
+            ]));
+            foreach ($publicPolicy as $key => $value) {
+                $publicPolicy[$key] = $key === 'ready'
+                    ? $value === true
+                    : (is_string($value) && (preg_match('/\A[0-9]{1,78}\z/', $value) === 1
+                        || preg_match('/\A0x[0-9a-f]{40}\z/', $value) === 1) ? $value : '');
+            }
+            $context['fee_payer_pilot_policy'] = $publicPolicy;
         }
         $context['migration_count'] = count($database['migrations']);
         $context['approved_user_count'] = count($users);

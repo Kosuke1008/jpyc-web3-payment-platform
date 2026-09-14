@@ -34,7 +34,11 @@ final class NetworkProfileRegistry
             );
         }
 
-        return $this->hydrate($network, $profile);
+        return $this->hydrate(
+            $network,
+            $profile,
+            ($configuration['mainnet_activation_release_capable'] ?? null) === true
+        );
     }
 
     public function assertPaymentExecutionAllowed(
@@ -42,7 +46,9 @@ final class NetworkProfileRegistry
     ): NetworkProfile {
         $profile ??= $this->active();
 
-        if (! $profile->paymentExecutionEnabled) {
+        if (! $profile->paymentExecutionEnabled
+            || ($profile->id === 'kaia-mainnet'
+                && config('blockchain.payments_mainnet_enabled') !== true)) {
             throw new NetworkExecutionDisabledException(
                 'Payment execution is disabled for this blockchain network.'
             );
@@ -56,7 +62,11 @@ final class NetworkProfileRegistry
     ): NetworkProfile {
         $profile ??= $this->active();
 
-        if (! $profile->feeDelegationExecutionEnabled) {
+        if (! $profile->feeDelegationExecutionEnabled
+            || ($profile->id === 'kaia-mainnet'
+                && (config('blockchain.payments_mainnet_enabled') !== true
+                    || config('blockchain.mainnet_fee_delegation_enabled') !== true
+                    || config('blockchain.mainnet_broadcast_enabled') !== true))) {
             throw new NetworkExecutionDisabledException(
                 'Fee delegation is disabled for this blockchain network.'
             );
@@ -81,8 +91,11 @@ final class NetworkProfileRegistry
     }
 
     /** @param array<string, mixed> $profile */
-    private function hydrate(string $id, array $profile): NetworkProfile
-    {
+    private function hydrate(
+        string $id,
+        array $profile,
+        bool $mainnetCapable
+    ): NetworkProfile {
         $native = $profile['native_currency'] ?? null;
         $jpyc = $profile['jpyc'] ?? null;
 
@@ -126,7 +139,8 @@ final class NetworkProfileRegistry
             || ! is_bool($paymentEnabled)
             || ! is_bool($feeDelegationEnabled)
             || ($id === 'kaia-mainnet'
-                && ($paymentEnabled || $feeDelegationEnabled))) {
+                && ($paymentEnabled !== $mainnetCapable
+                    || $feeDelegationEnabled !== $mainnetCapable))) {
             throw new NetworkConfigurationException(
                 'Blockchain execution policy is invalid.'
             );

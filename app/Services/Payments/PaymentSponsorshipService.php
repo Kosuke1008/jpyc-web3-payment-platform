@@ -81,11 +81,26 @@ class PaymentSponsorshipService
         }
 
         try {
-            $submission = $this->gateway->sponsor($senderSignedTransaction);
+            // Expiry and every runtime gate are checked again after the
+            // durable attempt reservation and immediately before handoff.
+            $latestSnapshot = $this->assertPaymentEligible(Payment::find($payment->id));
+            $this->assertFeeDelegationEnabled($profile, $latestSnapshot);
+            $this->mainnetPolicy->assertRuntimeGates($latestSnapshot, $provider);
+            $submission = $this->gateway->sponsor(
+                $senderSignedTransaction,
+                (int) $payment->id,
+                $latestSnapshot->expiresAt->toIso8601String()
+            );
         } catch (PaymentSponsorshipException $exception) {
             $state = match ($exception->reason) {
                 PaymentSponsorshipException::PROVIDER_REJECTED => FeeDelegationAttemptState::REJECTED,
                 PaymentSponsorshipException::PROVIDER_REVERTED => FeeDelegationAttemptState::REVERTED,
+                PaymentSponsorshipException::SIGNER_PRE_BROADCAST_FAILED,
+                PaymentSponsorshipException::KILL_SWITCH_ACTIVE,
+                PaymentSponsorshipException::PAYMENT_EXPIRED,
+                PaymentSponsorshipException::POLICY_REJECTED,
+                PaymentSponsorshipException::DISABLED,
+                PaymentSponsorshipException::CONFIGURATION_ERROR => FeeDelegationAttemptState::FAILED,
                 default => FeeDelegationAttemptState::UNKNOWN_SUBMISSION,
             };
             $this->transitionAttempt($attempt->id, $state, [
@@ -93,11 +108,18 @@ class PaymentSponsorshipService
                 'diagnostic_code' => match ($state) {
                     FeeDelegationAttemptState::REJECTED => 'provider_rejected',
                     FeeDelegationAttemptState::REVERTED => 'transaction_reverted',
+                    FeeDelegationAttemptState::FAILED => $exception->diagnosticCode
+                        ?? match ($exception->reason) {
+                            PaymentSponsorshipException::KILL_SWITCH_ACTIVE => 'kill_switch_active',
+                            PaymentSponsorshipException::PAYMENT_EXPIRED => 'payment_expired',
+                            default => 'pre_broadcast_policy_failed',
+                        },
                     default => 'provider_status_unknown',
                 },
                 ...(in_array($state, [
                     FeeDelegationAttemptState::REJECTED,
                     FeeDelegationAttemptState::REVERTED,
+                    FeeDelegationAttemptState::FAILED,
                 ], true)
                     ? ['resolved_at' => now()]
                     : []),
@@ -202,6 +224,14 @@ class PaymentSponsorshipService
         string $fingerprint,
         string $senderTxHash
     ): array {
+        if ($attempt->network === 'kaia-mainnet') {
+            // The single Mainnet pilot never treats an identical retry as a
+            // second authorized HTTP submission, even if the first hash is known.
+            throw new PaymentSponsorshipException(
+                PaymentSponsorshipException::SPONSORSHIP_CONFLICT
+            );
+        }
+
         if ($attempt->provider !== $provider
             || ! hash_equals($attempt->request_fingerprint, $fingerprint)
             || ! hash_equals($attempt->sender_tx_hash, strtolower($senderTxHash))) {
@@ -310,7 +340,7 @@ class PaymentSponsorshipService
             );
         }
 
-        if (now()->gt($snapshot->expiresAt)) {
+        if (now()->gte($snapshot->expiresAt)) {
             throw new PaymentSponsorshipException(
                 PaymentSponsorshipException::PAYMENT_EXPIRED
             );

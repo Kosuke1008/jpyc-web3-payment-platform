@@ -71,16 +71,16 @@ return new class extends Migration
                     network IN ('kairos', 'kaia-mainnet')
                     AND chain_id > 0
                     AND provider IN ('self-hosted', 'kaia-managed')
-                    AND sender_address REGEXP BINARY '^0x[0-9a-f]{40}$'
-                    AND sender_tx_hash REGEXP BINARY '^0x[0-9a-f]{64}$'
-                    AND (tx_hash IS NULL OR tx_hash REGEXP BINARY '^0x[0-9a-f]{64}$')
-                    AND request_fingerprint REGEXP BINARY '^[0-9a-f]{64}$'
+                    AND sender_address REGEXP '^0x[0-9a-f]{40}$'
+                    AND sender_tx_hash REGEXP '^0x[0-9a-f]{64}$'
+                    AND (tx_hash IS NULL OR tx_hash REGEXP '^0x[0-9a-f]{64}$')
+                    AND request_fingerprint REGEXP '^[0-9a-f]{64}$'
                     AND state IN (
                         'reserved', 'validated', 'submitting', 'submitted',
                         'receipt_observed', 'confirmed', 'rejected',
                         'unknown_submission', 'reverted', 'failed'
                     )
-                    AND sender_nonce REGEXP BINARY '^(0|[1-9][0-9]{0,19})$'
+                    AND sender_nonce REGEXP '^(0|[1-9][0-9]{0,19})$'
                     AND (
                         provider_http_status IS NULL
                         OR provider_http_status BETWEEN 100 AND 599
@@ -92,7 +92,7 @@ return new class extends Migration
                 ALTER TABLE payment_fee_delegation_attempts
                 ADD CONSTRAINT fee_delegation_diagnostic_check CHECK (
                     diagnostic_code IS NULL
-                    OR diagnostic_code REGEXP BINARY '^[a-z0-9_]{1,64}$'
+                    OR diagnostic_code REGEXP '^[a-z0-9_]{1,64}$'
                 )
             SQL);
         }

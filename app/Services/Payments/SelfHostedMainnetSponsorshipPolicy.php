@@ -34,6 +34,17 @@ final class SelfHostedMainnetSponsorshipPolicy
             return $operation();
         }
 
+        $pilotPaymentId = config(
+            'services.fee_delegation.mainnet_staging.pilot_payment_id'
+        );
+        if ((! is_int($pilotPaymentId) && ! is_string($pilotPaymentId))
+            || preg_match('/\A[1-9][0-9]*\z/', (string) $pilotPaymentId) !== 1
+            || (string) $payment->id !== (string) $pilotPaymentId) {
+            throw new PaymentSponsorshipException(
+                PaymentSponsorshipException::POLICY_REJECTED
+            );
+        }
+
         $this->allowlist->assertAllowed(
             $snapshot,
             $transfer,
@@ -70,6 +81,30 @@ final class SelfHostedMainnetSponsorshipPolicy
         }
     }
 
+    public function assertRuntimeGates(
+        PaymentSnapshot $snapshot,
+        string $provider
+    ): void {
+        if ($provider !== 'self-hosted' || $snapshot->network !== 'kaia-mainnet') {
+            return;
+        }
+
+        $configuration = config('services.fee_delegation.self_hosted_mainnet');
+        if (! is_array($configuration)
+            || config('blockchain.mainnet_activation_release_capable') !== true
+            || ($configuration['enabled'] ?? null) !== true
+            || ($configuration['kill_switch'] ?? null) !== false
+            || config('blockchain.payments_mainnet_enabled') !== true
+            || config('blockchain.mainnet_fee_delegation_enabled') !== true
+            || config('blockchain.mainnet_broadcast_enabled') !== true) {
+            throw new PaymentSponsorshipException(
+                ($configuration['kill_switch'] ?? true) === true
+                    ? PaymentSponsorshipException::KILL_SWITCH_ACTIVE
+                    : PaymentSponsorshipException::POLICY_REJECTED
+            );
+        }
+    }
+
     /** @return array<string, int|string> */
     private function validatedLimits(
         PaymentSnapshot $snapshot,
@@ -80,6 +115,7 @@ final class SelfHostedMainnetSponsorshipPolicy
         );
 
         if (! is_array($configuration)
+            || config('blockchain.mainnet_activation_release_capable') !== true
             || ($configuration['enabled'] ?? null) !== true
             || ($configuration['kill_switch'] ?? null) !== false
             || config('blockchain.payments_mainnet_enabled') !== true
@@ -112,6 +148,21 @@ final class SelfHostedMainnetSponsorshipPolicy
                 );
             }
             $limits[$key] = (string) $value;
+        }
+
+        foreach ([
+            'max_payment_jpy',
+            'max_attempts_per_user',
+            'max_attempts_per_store',
+            'max_attempts_per_sender',
+            'max_attempts_global',
+            'daily_transaction_limit',
+        ] as $pilotOneLimit) {
+            if ($limits[$pilotOneLimit] !== '1') {
+                throw new PaymentSponsorshipException(
+                    PaymentSponsorshipException::POLICY_REJECTED
+                );
+            }
         }
 
         $limits['daily_budget_wei'] = $this->kaiaToWei(

@@ -11,6 +11,8 @@ use App\Payments\PaymentSnapshot;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Tests\Support\ConfirmedPaymentAttributes;
+use Tests\Support\LegacyPaymentTable;
 use Tests\TestCase;
 
 class PaymentDetailsTest extends TestCase
@@ -85,7 +87,7 @@ class PaymentDetailsTest extends TestCase
         $confirmed = $this->createPayment([
             'status' => 'confirmed',
             'expires_at' => now()->addMinute(),
-        ]);
+        ] + ConfirmedPaymentAttributes::forChain(1001));
         $expired = $this->createPayment([
             'expires_at' => now()->subMinute(),
         ], 'expired');
@@ -178,6 +180,7 @@ class PaymentDetailsTest extends TestCase
 
     public function test_legacy_payment_without_snapshot_fails_closed(): void
     {
+        LegacyPaymentTable::create();
         $payment = $this->createPayment();
         DB::table('payments')->where('id', $payment->id)->update([
             'network' => null,
@@ -196,6 +199,13 @@ class PaymentDetailsTest extends TestCase
             ->assertExactJson(['error' => 'Payment details unavailable']);
 
         $this->get("/pay/{$payment->id}")->assertInternalServerError();
+    }
+
+    protected function tearDown(): void
+    {
+        LegacyPaymentTable::drop();
+        Carbon::setTestNow();
+        parent::tearDown();
     }
 
     public function test_missing_payment_returns_not_found(): void

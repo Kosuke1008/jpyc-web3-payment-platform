@@ -85,12 +85,12 @@ return new class extends Migration
                     network IN ('kairos', 'kaia-mainnet', 'sepolia')
                     AND network_profile_version > 0
                     AND chain_id > 0
-                    AND token_contract REGEXP BINARY '^0x[0-9a-f]{40}$'
-                    AND token_symbol REGEXP BINARY '^[A-Z0-9]{1,16}$'
+                    AND token_contract REGEXP '^0x[0-9a-f]{40}$'
+                    AND token_symbol REGEXP '^[A-Z0-9]{1,16}$'
                     AND token_decimals BETWEEN 0 AND 255
-                    AND recipient_address REGEXP BINARY '^0x[0-9a-f]{40}$'
+                    AND recipient_address REGEXP '^0x[0-9a-f]{40}$'
                     AND display_amount BETWEEN 1 AND 100000
-                    AND atomic_amount REGEXP BINARY '^[1-9][0-9]{0,77}$'
+                    AND atomic_amount REGEXP '^[1-9][0-9]{0,77}$'
                 )
             )
         SQL);

@@ -9,6 +9,8 @@ interface FeeDelegationGateway
     public function assertConfigured(): void;
 
     public function sponsor(
-        string $senderSignedTransaction
+        string $senderSignedTransaction,
+        ?int $paymentId = null,
+        ?string $expiresAt = null
     ): FeeDelegationSubmission;
 }

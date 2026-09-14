@@ -13,6 +13,7 @@ use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Tests\Support\LegacyPaymentTable;
 use Tests\TestCase;
 
 class PaymentMigrationAuditTest extends TestCase
@@ -27,9 +28,17 @@ class PaymentMigrationAuditTest extends TestCase
     {
         parent::setUp();
 
+        LegacyPaymentTable::create($this->name() !== 'test_hardening_preflight_detects_same_chain_duplicates');
+
         if (DB::getDriverName() === 'sqlite') {
             DB::statement('PRAGMA ignore_check_constraints = ON');
         }
+    }
+
+    protected function tearDown(): void
+    {
+        LegacyPaymentTable::drop();
+        parent::tearDown();
     }
 
     public function test_complete_snapshot_is_valid_and_absent_or_partial_snapshot_is_not(): void
@@ -122,9 +131,11 @@ class PaymentMigrationAuditTest extends TestCase
 
     public function test_hardening_preflight_detects_same_chain_duplicates(): void
     {
-        Schema::table('payments', function ($table) {
-            $table->dropUnique('payments_chain_id_tx_hash_unique');
-        });
+        if (DB::getDriverName() === 'sqlite') {
+            Schema::table('payments', function ($table) {
+                $table->dropUnique('payments_chain_id_tx_hash_unique');
+            });
+        }
         $this->paymentWithSnapshot(['tx_hash' => self::TX_HASH]);
         $this->paymentWithSnapshot(['tx_hash' => self::TX_HASH]);
 

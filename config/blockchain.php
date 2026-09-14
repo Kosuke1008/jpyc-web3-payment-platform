@@ -1,5 +1,9 @@
 <?php
 
+use App\Blockchain\MainnetActivationRelease;
+
+$mainnetActivationReleaseCapable = MainnetActivationRelease::capable();
+
 return [
     // BLOCKCHAIN_NETWORK is intentionally independent from APP_ENV. The
     // WEB3_NETWORK fallback preserves existing deployments during migration.
@@ -10,6 +14,7 @@ return [
     'payments_mainnet_enabled' => env('PAYMENTS_MAINNET_ENABLED', false),
     'mainnet_fee_delegation_enabled' => env('MAINNET_FEE_DELEGATION_ENABLED', false),
     'mainnet_broadcast_enabled' => env('MAINNET_BROADCAST_ENABLED', false),
+    'mainnet_activation_release_capable' => $mainnetActivationReleaseCapable,
     'mainnet_readiness_max_block_lag' => env('MAINNET_READINESS_MAX_BLOCK_LAG', 10),
 
     'payment_max_jpy' => env('PAYMENT_MAX_JPY', 100000),
@@ -58,9 +63,10 @@ return [
                 'decimals' => 18,
             ],
             'testnet' => false,
-            // Deliberately hard-disabled until later migration phases.
-            'payment_execution_enabled' => false,
-            'fee_delegation_execution_enabled' => false,
+            // An ordinary checkout has no activation artifact and remains
+            // structurally unable to execute, regardless of runtime flags.
+            'payment_execution_enabled' => $mainnetActivationReleaseCapable,
+            'fee_delegation_execution_enabled' => $mainnetActivationReleaseCapable,
         ],
 
         // Explicitly isolated compatibility profile for the pre-Kaia flow.

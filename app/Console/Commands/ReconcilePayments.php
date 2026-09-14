@@ -10,7 +10,7 @@ class ReconcilePayments extends Command
 {
     protected $signature = 'payments:reconcile {payment? : A confirmed Payment ID}';
 
-    protected $description = 'Recheck stored confirmation evidence without broadcasting transactions';
+    protected $description = 'Read-only recheck of stored confirmation evidence without changing Payment data';
 
     public function handle(PaymentReconciliationService $reconciliation): int
     {

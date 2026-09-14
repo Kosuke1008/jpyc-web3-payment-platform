@@ -1,0 +1,3 @@
+<?php
+
+return ['release' => 'phase-13-mainnet-pilot-v1'];

@@ -19,7 +19,9 @@ final readonly class MainnetStagingReadinessReport
     {
         return [
             'overall' => $this->ready ? 'READ_ONLY_READY' : 'NOT_READY',
-            'signing' => 'NOT_READY',
+            'signing' => ($this->checks['signer_state']['ready'] ?? false)
+                ? 'SIGNER_READY'
+                : 'SIGNER_NOT_READY',
             'broadcast' => 'DISABLED',
             'checks' => $this->checks,
             'context' => $this->publicContext,

@@ -1,6 +1,6 @@
 # Self-hosted Kaia Mainnet Fee Payer runbook
 
-状態: Phase 8構造準備済み。execution/signing/broadcast、Mainnet staging、fundingは未実施。
+状態: Phase 9.5 AWS KMS adapter準備済み。execution/signing/broadcast、fundingは未実施。
 
 ## 1. Architecture and ownership
 
@@ -30,16 +30,17 @@ LaravelがPayment、attempt、idempotency、rate/budgetの正本である。Fee 
 
 ## 3. Signer and key custody
 
-`FeePayerSigner`がkey custodyをpolicy/RLP/broadcastから分離する。Phase 8はKairos専用
-`LocalPrivateKeyFeePayerSigner`だけを実装し、Mainnet signer factoryは必ずfail closedとなる。
+`FeePayerSigner`がkey custodyをpolicy/RLP/broadcastから分離する。Kairos専用
+`LocalPrivateKeyFeePayerSigner`とMainnet専用AWS KMS adapterを実装した。Mainnetはlocal keyを拒否し、
+KMS public key/address/algorithm/stateが一致しなければfail closedとなる。
 
-Mainnetはdedicated wallet、KMS/HSM/external signer、isolated service account、secret manager、最小KAIA残高を
+Mainnetはdedicated AWS KMS key、isolated IAM role、最小KAIA残高を
 使用する。Mainnet private keyを`.env`、repository、Laravel ledger、logへ置かない。process-local Mainnet keyが
 設定されていれば起動時に拒否する。
 
 ## 4. Gates and kill switch
 
-Phase 8ではすべて次の状態を維持する。
+Phase 9.5でもすべて次の状態を維持する。
 
 ```text
 PAYMENTS_MAINNET_ENABLED=false
@@ -77,12 +78,13 @@ corepack pnpm readiness:mainnet
 
 primaryからchain ID、JPYC bytecode/symbol/decimals、latest block、native KAIA balanceをread-only取得する。
 secondaryはchain ID/latest blockだけ確認する。最低reserve未満、timeout、public RPC、同一wallet、open execution gateで
-failする。成功条件はMainnet signing/broadcast無効、kill switch active、external signer addressだけ設定済みであり、
+failする。成功条件はMainnet signing/broadcast無効、kill switch active、external signer metadata/address検証済みであり、
 実行許可を意味しない。
 
 ## 7. Unknown submission and RPC outage
 
 broadcast timeout/reset/ambiguous RPC errorでは自動retryしない。Laravelは`unknown_submission`へ遷移する。
+Fee Payerが明示するpre-broadcast signer failureは`failed`へ遷移し、自動retryしない。
 
 ```bash
 php artisan payments:resolve-fee-delegation-attempts --payment=<PAYMENT_ID>
@@ -121,7 +123,7 @@ Kairos key generation toolを含めない。
 
 - Stage 2 DB audit/migration
 - dedicated primary RPCと監視用secondary
-- KMS/HSM external signer実装・security review
+- AWS KMS runtime key/IAM構築・security review・offline proof
 - wallet separation、shared cache lock、budget/rate/balance alert検証
 - one-merchant/user allowlist、kill-switch drill、staging rehearsal
 - 別途Mainnet承認
@@ -130,6 +132,9 @@ Kairos key generation toolを含めない。
 一部のflagだけを変更しても実行可能にしてはならない。
 
 ## 13. Official references
+
+External signerの作成、IAM、offline proof、rotation、compromise手順は
+[`external-signer-runbook.md`](external-signer-runbook.md)を参照する。
 
 - [Kaia fee delegation](https://docs.kaia.io/build/transactions/fee-delegation/)
 - [Wallet and fee-payer responsibility](https://docs.kaia.io/build/wallets/dapp-integration/how-to-integrate-fee-delegation-features-into-wallets/)

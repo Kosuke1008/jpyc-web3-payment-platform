@@ -58,13 +58,13 @@ class MainnetStagingReadinessTest extends TestCase
         Http::preventStrayRequests();
     }
 
-    public function test_reports_read_only_ready_with_signer_unavailable(): void
+    public function test_reports_read_only_and_external_signer_ready(): void
     {
         $report = app(MainnetStagingReadinessChecker::class)->check();
 
         $this->assertTrue($report->ready);
         $this->assertSame('READ_ONLY_READY', $report->toArray()['overall']);
-        $this->assertSame('NOT_READY', $report->toArray()['signing']);
+        $this->assertSame('SIGNER_READY', $report->toArray()['signing']);
         $this->assertSame('DISABLED', $report->toArray()['broadcast']);
         $this->assertSame(self::MERCHANT, $report->publicContext['merchant_address']);
         $this->assertSame(self::FEE_PAYER, $report->publicContext['fee_payer_address']);
@@ -73,6 +73,28 @@ class MainnetStagingReadinessTest extends TestCase
             ->expectsOutputToContain('READ_ONLY_READY')
             ->assertSuccessful();
 
+        Http::assertNotSent(fn (Request $request): bool => in_array(
+            $request['method'] ?? null,
+            ['eth_sendRawTransaction', 'kaia_sendRawTransaction'],
+            true
+        ));
+    }
+
+    public function test_activation_capable_release_remains_read_only_ready_with_all_runtime_gates_closed(): void
+    {
+        config([
+            'blockchain.mainnet_activation_release_capable' => true,
+            'blockchain.profiles.kaia-mainnet.payment_execution_enabled' => true,
+            'blockchain.profiles.kaia-mainnet.fee_delegation_execution_enabled' => true,
+        ]);
+        Http::swap(new Factory);
+        $this->fakeReadOnlyServices(activationCapable: true);
+
+        $report = app(MainnetStagingReadinessChecker::class)->check(readOnly: true);
+
+        $this->assertTrue($report->ready);
+        $this->assertTrue($report->checks['execution_gates']['ready']);
+        $this->assertTrue($report->checks['fee_payer_service']['ready']);
         Http::assertNotSent(fn (Request $request): bool => in_array(
             $request['method'] ?? null,
             ['eth_sendRawTransaction', 'kaia_sendRawTransaction'],
@@ -95,6 +117,32 @@ class MainnetStagingReadinessTest extends TestCase
         $this->assertFalse($report->checks['cache_lock']['ready']);
     }
 
+    public function test_missing_staging_configuration_is_rejected(): void
+    {
+        config(['services.fee_delegation.mainnet_staging' => []]);
+
+        $report = app(MainnetStagingReadinessChecker::class)->check();
+
+        $this->assertFalse($report->ready);
+        $this->assertFalse($report->checks['environment']['ready']);
+        $this->assertFalse($report->checks['database']['ready']);
+        $this->assertFalse($report->checks['cache_lock']['ready']);
+        $this->assertFalse($report->checks['identity_separation']['ready']);
+    }
+
+    public function test_reused_database_and_cache_namespaces_are_rejected(): void
+    {
+        config([
+            'services.fee_delegation.mainnet_staging.kairos_database_identifier' => 'livt_mainnet_staging',
+            'services.fee_delegation.mainnet_staging.kairos_cache_prefix' => 'livt-mainnet-staging-cache-',
+        ]);
+
+        $report = app(MainnetStagingReadinessChecker::class)->check();
+
+        $this->assertFalse($report->checks['database']['ready']);
+        $this->assertFalse($report->checks['cache_lock']['ready']);
+    }
+
     public function test_kairos_or_public_rpc_cannot_be_mainnet_staging_rpc(): void
     {
         foreach ([
@@ -105,6 +153,17 @@ class MainnetStagingReadinessTest extends TestCase
             $report = app(MainnetStagingReadinessChecker::class)->check();
             $this->assertFalse($report->checks['rpc_separation']['ready']);
         }
+    }
+
+    public function test_primary_and_secondary_rpc_must_be_distinct(): void
+    {
+        config([
+            'blockchain.profiles.kaia-mainnet.secondary_rpc_url' => self::PRIMARY,
+        ]);
+
+        $report = app(MainnetStagingReadinessChecker::class)->check();
+
+        $this->assertFalse($report->checks['rpc_separation']['ready']);
     }
 
     public function test_wrong_rpc_chain_fails_read_only_readiness(): void
@@ -187,21 +246,31 @@ class MainnetStagingReadinessTest extends TestCase
                         'prefix' => 'livt-mainnet-staging-cache-',
                     ];
                 }
+
+                public function cacheConfiguration(): array
+                {
+                    return $this->cacheLock();
+                }
             }
         );
     }
 
-    private function fakeReadOnlyServices(string $chainId = '0x2019'): void
-    {
-        Http::fake(function (Request $request) use ($chainId) {
+    private function fakeReadOnlyServices(
+        string $chainId = '0x2019',
+        bool $activationCapable = false
+    ): void {
+        Http::fake(function (Request $request) use ($chainId, $activationCapable) {
             if ($request->url() === 'http://127.0.0.1:19000/health') {
                 return Http::response([
-                    'status' => 'STRUCTURALLY_READY',
+                    'status' => $activationCapable ? 'READY' : 'READ_ONLY_READY',
+                    'activation_release_capable' => $activationCapable,
                     'network' => 'kaia-mainnet',
                     'chain_id' => 8217,
                     'fee_payer_address' => self::FEE_PAYER,
                     'balance_kaia' => '0.2',
-                    'signer_status' => 'UNAVAILABLE',
+                    'signer_status' => 'SIGNER_READY',
+                    'signer_type' => 'aws-kms',
+                    'signer_key_reference' => 'sha256:0123456789abcdef',
                     'kill_switch' => 'ACTIVE',
                     'execution' => 'DISABLED',
                     'signing' => 'DISABLED',

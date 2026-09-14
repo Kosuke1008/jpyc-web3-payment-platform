@@ -1,7 +1,7 @@
 # LivT Kaia Mainnet移行設計
 
 最終更新: 2026-09-07
-状態: Phase 1〜8実装済み、Phase 9 Mainnet staging read-only準備済み。Mainnet実行は無効
+状態: Phase 1〜9.5実装済み。AWS KMS signer adapter準備済み、Mainnet実行は無効
 
 ## 0. 目的と結論
 
@@ -250,12 +250,19 @@ FEE_PAYER_KAIROS_PRIVATE_KEY=
 FEE_PAYER_API_KEY=
 FEE_PAYER_SPONSORING_ENABLED=true
 
-# 将来のself-hosted Mainnet用。平文private key変数は定義しない。
+# self-hosted Mainnet用。平文private key変数は定義しない。
 FEE_PAYER_KAIA_MAINNET_RPC_URL=
-FEE_PAYER_SIGNER_MODE=kms
-FEE_PAYER_KMS_KEY_ID=
+FEE_PAYER_KAIA_MAINNET_ADDRESS=
+FEE_PAYER_MAINNET_SIGNER_TYPE=external
+FEE_PAYER_MAINNET_SIGNER_BACKEND=aws-kms
+FEE_PAYER_AWS_REGION=
+FEE_PAYER_AWS_KMS_KEY_ID=
+FEE_PAYER_SIGNER_TIMEOUT_MS=5000
 FEE_PAYER_MAINNET_ENABLED=false
-FEE_PAYER_DAILY_BUDGET_PEB=
+SELF_HOSTED_MAINNET_FEE_PAYER_ENABLED=false
+FEE_PAYER_MAINNET_SIGNING_ENABLED=false
+FEE_PAYER_MAINNET_BROADCAST_ENABLED=false
+FEE_PAYER_KILL_SWITCH=true
 FEE_PAYER_MAX_GAS=
 FEE_PAYER_RECEIPT_TIMEOUT_MS=
 ```
@@ -718,7 +725,10 @@ Mainnet接続を有効にする前に、以下をKairos、RPC stub、isolated DB
 ## 9. 推奨実装順序
 
 実装状況: Phase 1〜8に続き、Phase 9で専用DB/cache/RPC/identity/allowlistと集約readinessを準備した。
-Managed Serviceはoptional providerとして残る。Mainnet execution/signing/broadcast、external signer実装、
+Phase 9.5でAWS KMS external signer、identity/signature検証、offline proof commandを実装した。
+Phase 10で単一Payment ID、単一sender/user/merchant、1 JPYC、極小残高範囲、read-only preflightと
+operator runbookを実装した。実infra値の投入・KMS proof・入金・実行はoperator作業として未実施である。
+Managed Serviceはoptional providerとして残るがfallbackしない。Mainnet execution/signing/broadcast、
 実staging infrastructureへの設定投入、実送信は未完了である。
 
 1. この設計とnetwork ID、整数JPY、第三者支払い方針をレビュー確定する。
@@ -735,8 +745,10 @@ Managed Serviceはoptional providerとして残る。Mainnet execution/signing/b
 12. Laravelへmanaged adapter、persistent attempt ledger、SenderTxHash reconciliationを実装する。Mainnet実行は無効のまま試験する。（Phase 6実装済み）
 13. live-test gate、1 Payment固定、1 JPYC上限、SenderTxHash indexing readiness、pure dry runを準備する。（Phase 7実装済み、live未実施）
 14. security reviewと運用演習後、別途承認された1 JPYC Kairos試験へ進む。
-15. self-hosted Mainnet signer/RPC/budget運用をstagingで検証し、独立承認後だけ1 JPYC Mainnet pilotへ進む。
-    （Phase 9はread-only構成・観測モデルのみ完了）
+15. self-hosted Mainnet signer/RPC/budget運用をstagingで検証し、単一Payment preflightを通す。
+    （Phase 10のコードとrunbookまで完了。execution gateは無効）
+16. 独立change approval、tiny funding、構造的gateを変更する別releaseを経た後だけ、runbookに従い
+    1 JPYC Mainnet pilotを1回送信する。
 
 ## 10. Rollback
 
@@ -786,7 +798,7 @@ Phase 1〜3では次を行わない。
 
 1. LivTの価格は当面「整数JPYC（整数円）」だけでよいか。
 2. requesterとon-chain payerが異なる第三者支払いを正式に許可するか。
-3. Mainnet Fee PayerはKaia managed serviceを使用する。self-hostedはKairos回帰用に残し、Mainnet fallbackにはしない。（Phase 5決定済み）
+3. Mainnet Fee Payerはself-hosted sidecar + AWS KMSを採用する。Kaia managed serviceは自動fallbackにしない。（Phase 9.5決定済み）
 
-network profileとPayment snapshotは実装済みである。次の実装開始条件は、Kaia側のtype `0x31`対応、
-idempotency/recovery契約、料金・quota・停止手段の確認と、LivT側persistent attempt ledgerの設計承認である。
+network profile、Payment snapshot、persistent attempt ledger、AWS KMS adapterは実装済みである。次の開始条件は、
+実AWS key/IAMのreview、offline KMS proof、staging運用演習、監視、fundingとexecution enablementの独立承認である。

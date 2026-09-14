@@ -35,6 +35,8 @@ class PaymentSponsorshipException extends RuntimeException
 
     public const PROVIDER_REVERTED = 'provider_reverted';
 
+    public const SIGNER_PRE_BROADCAST_FAILED = 'signer_pre_broadcast_failed';
+
     public const KILL_SWITCH_ACTIVE = 'kill_switch_active';
 
     public const POLICY_REJECTED = 'policy_rejected';
@@ -47,6 +49,7 @@ class PaymentSponsorshipException extends RuntimeException
         public readonly string $reason,
         public readonly ?string $externalMethod = null,
         public readonly ?int $upstreamStatus = null,
+        public readonly ?string $diagnosticCode = null,
         ?Throwable $previous = null
     ) {
         parent::__construct($reason, 0, $previous);

@@ -32,6 +32,19 @@ class MainnetStagingInfrastructure
     }
 
     /** @return array{ready: bool, driver: string, prefix: string} */
+    public function cacheConfiguration(): array
+    {
+        $driver = (string) config('cache.default');
+        $prefix = (string) config('cache.prefix');
+
+        return [
+            'ready' => in_array($driver, ['database', 'redis'], true),
+            'driver' => $driver,
+            'prefix' => $prefix,
+        ];
+    }
+
+    /** @return array{ready: bool, driver: string, prefix: string} */
     public function cacheLock(): array
     {
         $driver = (string) config('cache.default');

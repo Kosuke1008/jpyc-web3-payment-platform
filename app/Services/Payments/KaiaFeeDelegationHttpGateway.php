@@ -19,7 +19,9 @@ abstract class KaiaFeeDelegationHttpGateway implements FeeDelegationGateway
     }
 
     public function sponsor(
-        string $senderSignedTransaction
+        string $senderSignedTransaction,
+        ?int $paymentId = null,
+        ?string $expiresAt = null
     ): FeeDelegationSubmission {
         [$url, $apiKey, $timeout] = $this->configuration();
 
@@ -34,7 +36,11 @@ abstract class KaiaFeeDelegationHttpGateway implements FeeDelegationGateway
 
             $response = $request->post(
                 rtrim($url, '/').'/api/signAsFeePayer',
-                ['userSignedTx' => ['raw' => $senderSignedTransaction]]
+                array_filter([
+                    'userSignedTx' => ['raw' => $senderSignedTransaction],
+                    'paymentId' => $paymentId,
+                    'expiresAt' => $expiresAt,
+                ], fn (mixed $value): bool => $value !== null)
             );
         } catch (ConnectionException $exception) {
             throw new PaymentSponsorshipException(
@@ -49,6 +55,12 @@ abstract class KaiaFeeDelegationHttpGateway implements FeeDelegationGateway
         }
 
         if (! $response->successful()) {
+            if (! $this->managed()) {
+                $signerFailure = $this->preBroadcastSignerFailure($response);
+                if ($signerFailure !== null) {
+                    throw $signerFailure;
+                }
+            }
             $definitive = $this->managed()
                 ? in_array(
                     $response->status(),
@@ -207,6 +219,43 @@ abstract class KaiaFeeDelegationHttpGateway implements FeeDelegationGateway
             PaymentSponsorshipException::PROVIDER_STATUS_UNKNOWN,
             externalMethod: 'signAsFeePayer',
             upstreamStatus: $response->status()
+        );
+    }
+
+    private function preBroadcastSignerFailure(
+        Response $response
+    ): ?PaymentSponsorshipException {
+        try {
+            $body = json_decode(
+                $response->body(),
+                true,
+                8,
+                JSON_THROW_ON_ERROR
+            );
+        } catch (JsonException) {
+            return null;
+        }
+
+        $code = is_array($body) ? ($body['error'] ?? null) : null;
+        if (! is_string($code) || ! in_array($code, [
+            'SIGNER_UNAVAILABLE',
+            'SIGNER_TIMEOUT',
+            'AUTHENTICATION_FAILURE',
+            'SIGNING_FAILURE',
+            'INVALID_SIGNATURE',
+            'INVALID_KEY',
+            'KEY_MISMATCH',
+            'KILL_SWITCH_ACTIVE',
+            'PAYMENT_EXPIRED',
+        ], true)) {
+            return null;
+        }
+
+        return new PaymentSponsorshipException(
+            PaymentSponsorshipException::SIGNER_PRE_BROADCAST_FAILED,
+            externalMethod: 'signAsFeePayer',
+            upstreamStatus: $response->status(),
+            diagnosticCode: strtolower($code)
         );
     }
 }

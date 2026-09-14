@@ -104,6 +104,10 @@ return [
             ),
         ],
         'mainnet_staging' => [
+            'pilot_payment_id' => env('MAINNET_PILOT_PAYMENT_ID'),
+            'pilot_max_fee_payer_balance_kaia' => env(
+                'MAINNET_PILOT_MAX_FEE_PAYER_BALANCE_KAIA'
+            ),
             'environment_id' => env('MAINNET_STAGING_ENVIRONMENT_ID'),
             'database_identifier' => env(
                 'MAINNET_STAGING_DATABASE_IDENTIFIER'

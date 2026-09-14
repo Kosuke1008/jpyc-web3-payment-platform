@@ -253,23 +253,6 @@ final class OnChainPaymentEvidenceVerifier
                 continue;
             }
 
-            if (($log['removed'] ?? false) === true) {
-                throw new PaymentVerificationException(
-                    PaymentVerificationException::INVALID_TRANSACTION
-                );
-            }
-
-            if ((array_key_exists('removed', $log)
-                    && ! is_bool($log['removed']))
-                || (array_key_exists('transactionHash', $log)
-                    && $this->nullableHash($log['transactionHash']) !== $transactionHash)
-                || (array_key_exists('blockHash', $log)
-                    && $this->nullableHash($log['blockHash']) !== $blockHash)
-                || (array_key_exists('blockNumber', $log)
-                    && $this->quantity($log['blockNumber']) !== $blockNumber)) {
-                $this->invalidEvidence();
-            }
-
             if (! isset($log['address'], $log['topics'], $log['data'], $log['logIndex'])
                 || ! is_string($log['address'])
                 || ! is_array($log['topics'])
@@ -284,6 +267,17 @@ final class OnChainPaymentEvidenceVerifier
                 || preg_match('/\A0x[0-9a-fA-F]{64}\z/', $log['topics'][2]) !== 1
                 || preg_match('/\A0x[0-9a-fA-F]{64}\z/', $log['data']) !== 1) {
                 continue;
+            }
+
+            if (! array_key_exists('removed', $log)
+                || $log['removed'] !== false
+                || ! array_key_exists('transactionHash', $log)
+                || $this->nullableHash($log['transactionHash']) !== $transactionHash
+                || ! array_key_exists('blockHash', $log)
+                || $this->nullableHash($log['blockHash']) !== $blockHash
+                || ! array_key_exists('blockNumber', $log)
+                || $this->quantity($log['blockNumber']) !== $blockNumber) {
+                $this->invalidEvidence();
             }
 
             $payer = '0x'.substr(strtolower($log['topics'][1]), -40);

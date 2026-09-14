@@ -15,6 +15,7 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Tests\Support\LegacyPaymentTable;
 use Tests\TestCase;
 
 class PaymentReconciliationTest extends TestCase
@@ -57,6 +58,7 @@ class PaymentReconciliationTest extends TestCase
 
     protected function tearDown(): void
     {
+        LegacyPaymentTable::drop();
         Carbon::setTestNow();
 
         parent::tearDown();
@@ -65,18 +67,25 @@ class PaymentReconciliationTest extends TestCase
     public function test_valid_confirmed_payment_reconciles_without_replacing_evidence(): void
     {
         $payment = $this->confirmedPayment();
-        $originalVerifiedAt = $payment->verified_at;
+        $original = DB::table('payments')->where('id', $payment->id)->first();
         $this->fakeEvidenceRpc();
+        DB::flushQueryLog();
+        DB::enableQueryLog();
 
         $result = app(PaymentReconciliationService::class)->reconcile($payment);
 
-        $payment->refresh();
         $this->assertSame(PaymentReconciliationService::VERIFIED, $result);
-        $this->assertSame('verified', $payment->reconciliation_status);
-        $this->assertNull($payment->reconciliation_error_code);
-        $this->assertNotNull($payment->reconciled_at);
-        $this->assertSame(self::BLOCK_HASH, $payment->confirmed_block_hash);
-        $this->assertTrue($originalVerifiedAt->equalTo($payment->verified_at));
+        $this->assertEquals(
+            $original,
+            DB::table('payments')->where('id', $payment->id)->first()
+        );
+        $this->assertSame([], array_values(array_filter(
+            DB::getQueryLog(),
+            fn (array $query): bool => preg_match(
+                '/\A\s*(insert|update|delete|replace|alter|drop|create|truncate)\b/i',
+                $query['query']
+            ) === 1
+        )));
     }
 
     public function test_changed_canonical_block_hash_is_recorded_as_anomaly(): void
@@ -89,7 +98,8 @@ class PaymentReconciliationTest extends TestCase
 
         $payment->refresh();
         $this->assertSame(PaymentReconciliationService::ANOMALY, $result);
-        $this->assertSame('confirmation_evidence_mismatch', $payment->reconciliation_error_code);
+        $this->assertNull($payment->reconciliation_error_code);
+        $this->assertSame('pending', $payment->reconciliation_status);
         $this->assertSame(self::BLOCK_HASH, $payment->confirmed_block_hash);
     }
 
@@ -102,7 +112,8 @@ class PaymentReconciliationTest extends TestCase
 
         $payment->refresh();
         $this->assertSame(PaymentReconciliationService::ANOMALY, $result);
-        $this->assertSame('transaction_not_found', $payment->reconciliation_error_code);
+        $this->assertNull($payment->reconciliation_error_code);
+        $this->assertSame('pending', $payment->reconciliation_status);
         $this->assertSame(self::TX_HASH, $payment->tx_hash);
         $this->assertSame(self::BLOCK_HASH, $payment->confirmed_block_hash);
     }
@@ -118,7 +129,8 @@ class PaymentReconciliationTest extends TestCase
 
         $payment->refresh();
         $this->assertSame(PaymentReconciliationService::ANOMALY, $result);
-        $this->assertSame('invalid_transaction', $payment->reconciliation_error_code);
+        $this->assertNull($payment->reconciliation_error_code);
+        $this->assertSame('pending', $payment->reconciliation_status);
         $this->assertSame('125000000000000000000', $payment->atomic_amount);
     }
 
@@ -132,8 +144,8 @@ class PaymentReconciliationTest extends TestCase
 
         $payment->refresh();
         $this->assertSame(PaymentReconciliationService::TRANSIENT_FAILURE, $result);
-        $this->assertSame('transient_failure', $payment->reconciliation_status);
-        $this->assertSame('rpc_transport_failure', $payment->reconciliation_error_code);
+        $this->assertSame('pending', $payment->reconciliation_status);
+        $this->assertNull($payment->reconciliation_error_code);
         $this->assertSame(self::TX_HASH, $payment->tx_hash);
         $this->assertSame(self::BLOCK_HASH, $payment->confirmed_block_hash);
         Log::shouldHaveReceived('warning')->once();
@@ -141,6 +153,7 @@ class PaymentReconciliationTest extends TestCase
 
     public function test_legacy_confirmed_payment_without_evidence_is_not_guessed(): void
     {
+        LegacyPaymentTable::create();
         $payment = $this->confirmedPayment();
         DB::table('payments')->where('id', $payment->id)->update([
             'observed_chain_id' => null,
@@ -157,10 +170,8 @@ class PaymentReconciliationTest extends TestCase
 
         $payment->refresh();
         $this->assertSame(PaymentReconciliationService::ANOMALY, $result);
-        $this->assertSame(
-            'confirmation_evidence_unavailable',
-            $payment->reconciliation_error_code
-        );
+        $this->assertNull($payment->reconciliation_error_code);
+        $this->assertSame('pending', $payment->reconciliation_status);
         Http::assertNothingSent();
     }
 
@@ -269,6 +280,9 @@ class PaymentReconciliationTest extends TestCase
                 ),
                 'logIndex' => '0x0',
                 'removed' => false,
+                'transactionHash' => self::TX_HASH,
+                'blockNumber' => '0x10',
+                'blockHash' => $blockHash,
             ]],
         ];
     }

@@ -82,7 +82,9 @@ final class MainnetReadinessChecker
         }
 
         if ($profile->paymentExecutionEnabled
+                !== (config('blockchain.mainnet_activation_release_capable') === true)
             || $profile->feeDelegationExecutionEnabled
+                !== (config('blockchain.mainnet_activation_release_capable') === true)
             || config('blockchain.payments_mainnet_enabled') !== false
             || config('blockchain.mainnet_fee_delegation_enabled') !== false
             || config('blockchain.mainnet_broadcast_enabled') !== false) {

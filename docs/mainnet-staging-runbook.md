@@ -1,6 +1,7 @@
-# Kaia Mainnet staging runbook（Phase 9）
+# Kaia Mainnet staging runbook（Phase 10）
 
-状態: read-only staging準備用。署名・broadcast・Fee Payer入金は禁止。
+状態: read-only staging準備用。Mainnet transaction署名・broadcast・Fee Payer入金は禁止。
+operatorが明示する固定test digestのKMS offline署名だけを許可する。
 
 ## 1. Architecture
 
@@ -69,21 +70,22 @@ block-height差をread-only検査する。secondaryは観測専用でbroadcast f
 merchantは受取用public addressだけを設定し、秘密鍵をLivTへ渡さない。Mainnet merchant、Mainnet Fee
 Payer、Kairos merchant、Kairos Fee Payerを分離し、merchant/Fee Payer同一addressも禁止する。
 
-Mainnet Fee Payerはaddressだけを設定する。Phase 9では`signer_status=UNAVAILABLE`が正常で、Fee Payerへ
-KAIAを送らない。
+Mainnet Fee PayerはAWS KMS公開鍵から導出したaddressを設定する。Phase 9.5ではmetadata health成功時に
+`SIGNER_READY`となるが、execution/broadcastは無効でFee PayerへKAIAを送らない。詳細は
+`external-signer-runbook.md`を参照する。
 
 ## 6. External signer boundary
 
-`FeePayerSigner`の将来adapter契約:
+`FeePayerSigner`のAWS KMS adapter契約:
 
 - input: `{ senderRaw }`（検査済みsender署名RLP）
 - output: `{ signedRaw }`（Fee Payer署名追加済みRLP）
 - public identity: `address`
-- health: `{ status: ready|unavailable, address }`
-- errors: unavailable、timeout、固定signing failure
+- health: ready/unavailable/authentication_failure/key_mismatch/invalid_key
+- errors: unavailable、timeout、auth、signing failure、invalid signature、key mismatch
 
-Laravel/API契約、transaction policy、RLP検証、broadcast ownerを変えずにadapterを差し替える。Phase 9の
-external実装は常にunavailableで署名要求を拒否する。
+公開鍵からaddressを導出して設定値と照合し、DER署名をlow-s化・recover検証する。Mainnet payment pathは
+code-level gateで到達不能のまま。local key/Managed providerへのfallbackはない。
 
 ## 7. Cache and locking
 
@@ -95,17 +97,19 @@ sectionへ入ること、Phase 8 policy lockの10秒TTL内でDB attempt commit�
 
 ## 8. Allowlist and pilot limits
 
-初回pilot例（すべてplaceholder、Phase 9では有効化しない）:
+初回pilot例（すべてplaceholder、Phase 9.5では有効化しない）:
 
 - merchant: 1 address
-- approved user: 1 ID以上
+- approved user: 1 ID
 - approved sender: 1 address
 - Payment上限: 1 JPYC
 - user/store/sender: 1 attempt/hour
-- global: 5 attempts/hour以下
-- daily transaction: 10以下
-- daily KAIA budget: 0.1以下を運用承認値へ調整
+- global: 1 attempt/hour
+- daily transaction: 1
+- daily KAIA budget: `max_gas * max_gas_price`を超える承認済み極小値
 - minimum reserve: 実gas/停止基準から決定
+- pilot Payment: `MAINNET_PILOT_PAYMENT_ID`の1件だけ
+- Fee Payer残高上限: `MAINNET_PILOT_MAX_FEE_PAYER_BALANCE_KAIA`
 
 allowlistはattempt予約・Fee Payer呼出し前に検査する。空allowlist、違うmerchant/user/senderはfail closed。
 
@@ -134,10 +138,17 @@ Laravel host:
 cd /path/to/jpyc-web3-payment-platform
 php artisan config:clear
 php artisan blockchain:mainnet-staging-readiness
+php artisan blockchain:mainnet-pilot-preflight
+php artisan payments:prepare-mainnet-pilot <PAYMENT_ID>
 ```
 
-期待値は`overall=READ_ONLY_READY`、`signing=NOT_READY`、`broadcast=DISABLED`。readinessはRPC/DB/
-cache/HTTPのread-only操作だけを行い、Payment作成、署名、broadcast、migrationを実行しない。
+期待値は`overall=READ_ONLY_READY`、Fee Payer `SIGNER_READY`、`broadcast=DISABLED`。通常readinessはRPC/DB/
+cache/KMS metadata/HTTPのread-only操作だけを行い、Payment作成、署名、broadcast、migrationを実行しない。
+実KMSの非transaction署名proofはoperatorが別途`corepack pnpm signer:test-mainnet`を明示実行する。
+
+Phase 11ではFee Payer残高の照会成功をread-only readiness条件とするが、minimum reserve未満だけを理由に
+失敗させない。healthは`funding_status=NOT_FUNDED`と現在残高・minimum reserveを返す。reserve以上なら
+`FUNDED`。Phase 12の`blockchain:mainnet-pilot-preflight`と実行policyは引き続き不足残高をfail closedにする。
 
 ## 11. Required disabled flags
 
@@ -162,9 +173,14 @@ key compromise疑いではkill switchを維持し、credentialを無効化し、
 rollbackはMainnet staging processを停止し設定を前版へ戻す。Kairos DBへの接続切替、migration rollback、
 データ削除は禁止。secretは外部secret storeから専用service accountへ渡し、`.env.example`には値を置かない。
 
-## 13. Blockers
+## 13. Phase 10 pilot procedure
 
-External signer実装前: KMS/HSM選定、IAM、timeout/error契約、監査、rotation、offline fixture検証、HA方針。
+exact Payment gate、funding計算、kill-switch/alert drill、将来のenable順序、one-click、evidence、shutdownは
+`mainnet-1-jpyc-pilot-runbook.md`を唯一のlive pilot手順として参照する。
+
+## 14. Blockers
+
+External signer adapterは実装済み。実AWS key/role policy review、offline KMS proof、監査alert、rotation drillは未実施。
 
 1 JPYC前: 上記完了、承認済み最小KAIA入金、全readiness、multi-worker lock、allowlist、alert、kill-switch
 drill、JPYC Mainnet情報再確認、change approval、別Phaseでの全gate変更。

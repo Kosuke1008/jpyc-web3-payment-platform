@@ -10,6 +10,7 @@ use App\Models\Payment;
 use App\Models\User;
 use App\Models\Wallet;
 use App\Payments\InvalidPaymentSnapshotException;
+use App\Payments\MainnetPilotGuard;
 use App\Payments\PaymentSnapshot;
 use App\Services\Payments\FeeDelegationEndpoint;
 use App\Services\Payments\PaymentTransactionVerifier;
@@ -201,6 +202,28 @@ class PaymentController extends Controller
             $chainName = $snapshot->network;
         }
 
+        $pilotMetadata = [];
+        if ($snapshot->network === 'kaia-mainnet') {
+            $pilotMetadata = ['network_profile_version' => $snapshot->networkProfileVersion, 'mainnet_pilot' => null];
+            try {
+                $guard = app(MainnetPilotGuard::class);
+                $guard->assertDatabase();
+                $identities = $guard->identities();
+                if (MainnetPilotGuard::positiveId(config('services.fee_delegation.mainnet_staging.pilot_payment_id')) === $payment->id
+                    && $payment->store_id === $identities['store']->id
+                    && $payment->staff_id === $identities['staff']->id
+                    && $snapshot->recipientAddress === $identities['merchant']) {
+                    $pilotMetadata['mainnet_pilot'] = [
+                        'payment_id' => $payment->id, 'store_id' => $payment->store_id,
+                        'user_id' => $identities['user']->id, 'merchant_address' => $identities['merchant'],
+                        'sender_address' => $identities['sender'],
+                    ];
+                }
+            } catch (Throwable) {
+                // Preserve immutable details for observation; missing approval metadata prevents wallet execution.
+            }
+        }
+
         return response()->json([
             'id' => $payment->id,
             'amount' => (int) $snapshot->displayAmount,
@@ -217,6 +240,7 @@ class PaymentController extends Controller
             'token_decimals' => $snapshot->tokenDecimals,
             'expires_at' => $snapshot->expiresAt->format('Y-m-d H:i:s'),
             'expires_at_iso' => $expiresAtIso,
+            ...$pilotMetadata,
         ]);
     }
 

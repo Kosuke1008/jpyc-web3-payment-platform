@@ -29,10 +29,24 @@ final class MainnetPilotAllowlist
         );
         $allowReuse = ($configuration['allow_cross_environment_reuse'] ?? null)
             === true;
+        $approvedUsers = $this->csv(
+            $configuration['approved_user_ids'] ?? null
+        );
+        $approvedSenders = array_map(
+            'strtolower',
+            $this->csv($configuration['approved_sender_addresses'] ?? null)
+        );
+        $approvedSender = count($approvedSenders) === 1
+            ? $this->address($approvedSenders[0])
+            : null;
 
         if ($merchant === null
             || $feePayer === null
+            || count($approvedUsers) !== 1
+            || preg_match('/\A[1-9][0-9]*\z/', $approvedUsers[0] ?? '') !== 1
+            || $approvedSender === null
             || strcasecmp($merchant, $feePayer) === 0
+            || strcasecmp($approvedSender, $feePayer) === 0
             || (! $allowReuse && ($kairosMerchant === null
                 || $kairosFeePayer === null
                 || strcasecmp($merchant, $kairosMerchant) === 0
@@ -41,17 +55,12 @@ final class MainnetPilotAllowlist
             || strcasecmp($transfer->recipient, $merchant) !== 0
             || ! in_array(
                 (string) $requesterUserId,
-                $this->csv($configuration['approved_user_ids'] ?? null),
+                $approvedUsers,
                 true
             )
             || ! in_array(
                 strtolower($transfer->sender),
-                array_map(
-                    'strtolower',
-                    $this->csv(
-                        $configuration['approved_sender_addresses'] ?? null
-                    )
-                ),
+                [$approvedSender],
                 true
             )) {
             $this->reject();

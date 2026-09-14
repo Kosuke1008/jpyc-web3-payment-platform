@@ -18,6 +18,8 @@ use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Laravel\Sanctum\Sanctum;
 use LogicException;
+use Tests\Support\ConfirmedPaymentAttributes;
+use Tests\Support\LegacyPaymentTable;
 use Tests\TestCase;
 
 class PaymentConfirmTest extends TestCase
@@ -61,6 +63,12 @@ class PaymentConfirmTest extends TestCase
         if (DB::getDriverName() === 'sqlite') {
             DB::statement('PRAGMA ignore_check_constraints = ON');
         }
+    }
+
+    protected function tearDown(): void
+    {
+        LegacyPaymentTable::drop();
+        parent::tearDown();
     }
 
     public function test_valid_jpyc_transfer_confirms_a_pending_payment(): void
@@ -654,6 +662,41 @@ class PaymentConfirmTest extends TestCase
         $this->assertPaymentIsStillPending($payment);
     }
 
+    public function test_transfer_log_requires_explicit_not_removed_evidence(): void
+    {
+        $payment = $this->createPayment();
+        $receipt = $this->successfulReceipt($payment->amount);
+        unset($receipt['logs'][0]['removed']);
+        $this->authenticateUser();
+        $this->fakeRpc($receipt);
+
+        $this->postJson(
+            "/api/payments/{$payment->id}/confirm",
+            ['tx_hash' => self::TX_HASH]
+        )->assertBadRequest();
+
+        $this->assertPaymentIsStillPending($payment);
+    }
+
+    public function test_transfer_log_requires_matching_transaction_and_block_references(): void
+    {
+        $payment = $this->createPayment();
+        $this->authenticateUser();
+
+        foreach (['transactionHash', 'blockNumber', 'blockHash'] as $field) {
+            $receipt = $this->successfulReceipt($payment->amount);
+            unset($receipt['logs'][0][$field]);
+            $this->fakeRpc($receipt);
+
+            $this->postJson(
+                "/api/payments/{$payment->id}/confirm",
+                ['tx_hash' => self::TX_HASH]
+            )->assertBadRequest();
+
+            $this->assertPaymentIsStillPending($payment);
+        }
+    }
+
     public function test_malformed_transfer_log_fails_closed(): void
     {
         $payment = $this->createPayment();
@@ -1023,6 +1066,7 @@ class PaymentConfirmTest extends TestCase
 
     public function test_legacy_payment_without_snapshot_fails_closed_before_rpc(): void
     {
+        LegacyPaymentTable::create();
         $payment = $this->createPayment();
         DB::table('payments')->where('id', $payment->id)->update(
             $this->emptySnapshotAttributes()
@@ -1042,6 +1086,7 @@ class PaymentConfirmTest extends TestCase
 
     public function test_explicitly_backfilled_legacy_payment_verifies_normally(): void
     {
+        LegacyPaymentTable::create();
         $payment = $this->createPayment();
         $snapshot = PaymentSnapshot::fromRecord($payment);
         DB::table('payments')->where('id', $payment->id)->update(
@@ -1135,12 +1180,12 @@ class PaymentConfirmTest extends TestCase
             'status' => 'confirmed',
             'tx_hash' => self::TX_HASH,
             'paid_at' => now(),
-        ]);
+        ] + ConfirmedPaymentAttributes::forChain(1001, self::TX_HASH));
         $this->authenticateUser();
 
         $this->postJson(
             "/api/payments/{$payment->id}/confirm",
-            ['tx_hash' => self::TX_HASH]
+            ['tx_hash' => '0x'.str_repeat('c', 64)]
         )
             ->assertBadRequest()
             ->assertExactJson(['error' => 'Already paid']);
@@ -1240,7 +1285,7 @@ class PaymentConfirmTest extends TestCase
             'status' => 'confirmed',
             'tx_hash' => self::TX_HASH,
             'paid_at' => now(),
-        ], $duplicate->databaseAttributes()));
+        ], $duplicate->databaseAttributes(), ConfirmedPaymentAttributes::forChain(1001, self::TX_HASH)));
         $this->authenticateUser();
 
         $this->postJson(
@@ -1264,7 +1309,7 @@ class PaymentConfirmTest extends TestCase
                 if ($method === 'eth_getTransactionReceipt') {
                     DB::table('payments')
                         ->where('id', $payment->id)
-                        ->update(['status' => 'confirmed']);
+                        ->update(['status' => 'failed']);
                 }
             }
         );
@@ -1274,10 +1319,10 @@ class PaymentConfirmTest extends TestCase
             ['tx_hash' => self::TX_HASH]
         )
             ->assertBadRequest()
-            ->assertExactJson(['error' => 'Already paid']);
+            ->assertExactJson(['error' => 'Payment not pending']);
 
         $payment->refresh();
-        $this->assertSame('confirmed', $payment->status);
+        $this->assertSame('failed', $payment->status);
         $this->assertNull($payment->tx_hash);
         $this->assertNull($payment->paid_at);
     }
@@ -1483,6 +1528,9 @@ class PaymentConfirmTest extends TestCase
                     'data' => '0x'.$amountHex,
                     'logIndex' => '0x0',
                     'removed' => false,
+                    'transactionHash' => self::TX_HASH,
+                    'blockNumber' => '0x10',
+                    'blockHash' => self::BLOCK_HASH,
                 ],
             ],
         ];
