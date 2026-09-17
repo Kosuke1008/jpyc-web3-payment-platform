@@ -66,9 +66,7 @@ final class MainnetPilotPaymentHistory
         )) {
             throw new RuntimeException('expired_pilot_history_invalid');
         }
-        if (PaymentFeeDelegationAttempt::query()
-            ->whereIn('payment_id', $payments->pluck('id'))
-            ->exists()) {
+        if ($this->hasUnsafeFeeDelegationAttempts($payments)) {
             throw new RuntimeException('fee_delegation_attempt_exists');
         }
         if ($this->hasLegacyTransaction($payments)) {
@@ -99,9 +97,7 @@ final class MainnetPilotPaymentHistory
                     $profile
                 )
             )
-            || PaymentFeeDelegationAttempt::query()
-                ->whereIn('payment_id', $history->pluck('id'))
-                ->exists()) {
+            || $this->hasUnsafeFeeDelegationAttempts($history)) {
             return false;
         }
 
@@ -137,6 +133,48 @@ final class MainnetPilotPaymentHistory
             && collect(self::EVIDENCE_FIELDS)->every(
                 fn (string $field): bool => $payment->getRawOriginal($field) === null
             );
+    }
+
+    /** @param Collection<int, Payment> $payments */
+    private function hasUnsafeFeeDelegationAttempts(Collection $payments): bool
+    {
+        if ($payments->isEmpty()) {
+            return false;
+        }
+
+        $attempts = PaymentFeeDelegationAttempt::query()
+            ->whereIn('payment_id', $payments->pluck('id'))
+            ->get();
+
+        return $payments->contains(function (Payment $payment) use ($attempts): bool {
+            $paymentAttempts = $attempts
+                ->where('payment_id', $payment->id)
+                ->values();
+
+            if ($paymentAttempts->isEmpty()) {
+                return false;
+            }
+
+            if ($paymentAttempts->count() !== 1) {
+                return true;
+            }
+
+            $attempt = $paymentAttempts->first();
+
+            return ! (
+                $attempt instanceof PaymentFeeDelegationAttempt
+                && $attempt->provider === 'self-hosted'
+                && $attempt->state === 'rejected'
+                && $attempt->provider_http_status === 400
+                && $attempt->diagnostic_code === 'provider_rejected'
+                && $attempt->tx_hash === null
+                && $attempt->validated_at !== null
+                && $attempt->submitting_at !== null
+                && $attempt->submitted_at === null
+                && $attempt->receipt_observed_at === null
+                && $attempt->resolved_at !== null
+            );
+        });
     }
 
     /** @param Collection<int, Payment> $payments */

@@ -172,6 +172,46 @@ final class ReplaceExpiredMainnetPilotPaymentTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_expired_payment_with_definitive_rejected_attempt_is_preserved_and_replaced(): void
+    {
+        $this->expirePayment();
+        $this->createDefinitiveRejectedAttempt();
+
+        $oldPayment = (array) DB::table('payments')
+            ->where('id', $this->payment->id)
+            ->first();
+        $oldAttempt = (array) DB::table('payment_fee_delegation_attempts')
+            ->where('payment_id', $this->payment->id)
+            ->sole();
+
+        $this->artisan('mainnet:replace-expired-pilot-payment')
+            ->assertSuccessful();
+
+        $this->assertDatabaseCount('payments', 2);
+        $this->assertDatabaseCount('payment_fee_delegation_attempts', 1);
+
+        $this->assertEquals(
+            $oldPayment,
+            (array) DB::table('payments')
+                ->where('id', $this->payment->id)
+                ->first()
+        );
+        $this->assertEquals(
+            $oldAttempt,
+            (array) DB::table('payment_fee_delegation_attempts')
+                ->where('payment_id', $this->payment->id)
+                ->sole()
+        );
+
+        $new = Payment::query()
+            ->whereKeyNot($this->payment->id)
+            ->sole();
+
+        $this->assertSame('pending', $new->status);
+        $this->assertNull($new->tx_hash);
+        Http::assertNothingSent();
+    }
+
     public function test_tx_or_confirmation_evidence_cannot_be_replaced(): void
     {
         foreach (['tx_hash', 'observed_chain_id'] as $field) {
@@ -426,6 +466,32 @@ final class ReplaceExpiredMainnetPilotPaymentTest extends TestCase
             'request_fingerprint' => str_repeat('b', 64),
             'state' => 'unknown_submission',
             'sender_nonce' => '1',
+        ]);
+    }
+
+    private function createDefinitiveRejectedAttempt(?Payment $payment = null): void
+    {
+        $payment ??= $this->payment;
+
+        PaymentFeeDelegationAttempt::query()->create([
+            'payment_id' => $payment->id,
+            'requester_user_id' => $this->user->id,
+            'network' => 'kaia-mainnet',
+            'chain_id' => 8217,
+            'provider' => 'self-hosted',
+            'sender_address' => self::SENDER,
+            'sender_tx_hash' => '0x'.str_repeat('c', 64),
+            'tx_hash' => null,
+            'request_fingerprint' => str_repeat('d', 64),
+            'state' => 'rejected',
+            'provider_http_status' => 400,
+            'diagnostic_code' => 'provider_rejected',
+            'sender_nonce' => '0',
+            'validated_at' => now(),
+            'submitting_at' => now(),
+            'submitted_at' => null,
+            'receipt_observed_at' => null,
+            'resolved_at' => now(),
         ]);
     }
 

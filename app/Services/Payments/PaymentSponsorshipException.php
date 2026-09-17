@@ -50,8 +50,22 @@ class PaymentSponsorshipException extends RuntimeException
         public readonly ?string $externalMethod = null,
         public readonly ?int $upstreamStatus = null,
         public readonly ?string $diagnosticCode = null,
-        ?Throwable $previous = null
+        ?Throwable $previous = null,
+        public readonly BroadcastCertainty $broadcastCertainty = BroadcastCertainty::BROADCAST_POSSIBLE
     ) {
         parent::__construct($reason, 0, $previous);
+    }
+
+    public function withBroadcastCertainty(
+        BroadcastCertainty $broadcastCertainty
+    ): self {
+        return new self(
+            $this->reason,
+            $this->externalMethod,
+            $this->upstreamStatus,
+            $this->diagnosticCode,
+            $this->getPrevious(),
+            $broadcastCertainty
+        );
     }
 }

@@ -363,15 +363,24 @@ class PaymentSponsorshipTest extends TestCase
             : Http::response([
                 'status' => false,
                 'error' => 'SIGNER_TIMEOUT',
+                'protocol_version' => 2,
+                'broadcast_certainty' => 'definitely_not_broadcast',
             ], 503));
 
-        $this->postJson("/api/payments/{$payment->id}/sponsor", [
+        $response = $this->postJson("/api/payments/{$payment->id}/sponsor", [
             'sender_signed_tx' => $raw,
-        ])
-            ->assertServiceUnavailable()
-            ->assertExactJson([
-                'error' => 'Fee sponsorship signer is unavailable',
-            ]);
+        ]);
+        $response->assertServiceUnavailable()->assertExactJson([
+            'error' => 'Fee sponsorship signer is unavailable',
+        ]);
+        $this->assertStringNotContainsString(
+            'broadcast_certainty',
+            $response->getContent()
+        );
+        $this->assertStringNotContainsString(
+            'protocol_version',
+            $response->getContent()
+        );
 
         $this->assertDatabaseHas('payment_fee_delegation_attempts', [
             'payment_id' => $payment->id,
@@ -1059,15 +1068,26 @@ class PaymentSponsorshipTest extends TestCase
             : Http::response([
                 'status' => false,
                 'error' => 'BAD_REQUEST',
+                'protocol_version' => 2,
+                'broadcast_certainty' => 'definitely_not_broadcast',
             ]));
 
-        $this->postJson("/api/payments/{$payment->id}/sponsor", [
+        $response = $this->postJson("/api/payments/{$payment->id}/sponsor", [
             'sender_signed_tx' => $this->senderSignedTransaction(
                 $payment->amount
             ),
-        ])
-            ->assertStatus(502)
-            ->assertExactJson(['error' => 'Fee sponsorship rejected']);
+        ]);
+        $response->assertStatus(502)->assertExactJson([
+            'error' => 'Fee sponsorship rejected',
+        ]);
+        $this->assertStringNotContainsString(
+            'broadcast_certainty',
+            $response->getContent()
+        );
+        $this->assertStringNotContainsString(
+            'protocol_version',
+            $response->getContent()
+        );
 
         $this->assertPaymentPending($payment);
         Http::assertSentCount(2);

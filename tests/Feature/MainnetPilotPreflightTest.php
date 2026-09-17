@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Blockchain\MainnetPilotGateStateChecker;
 use App\Blockchain\MainnetPilotPreflightChecker;
 use App\Blockchain\MainnetStagingInfrastructure;
 use App\Blockchain\NetworkProfileRegistry;
@@ -104,7 +105,10 @@ class MainnetPilotPreflightTest extends TestCase
 
         $this->assertTrue($report->ready);
         $this->assertSame('PILOT_PREFLIGHT_READY', $report->toArray()['overall']);
-        $this->assertSame('NO', $report->publicContext['activation_release_capable']);
+        $this->assertSame(
+            config('blockchain.mainnet_activation_release_capable') === true ? 'YES' : 'NO',
+            $report->publicContext['activation_release_capable']
+        );
         $this->assertSame('READY', $report->toArray()['signer']);
         $this->assertSame('DISABLED', $report->toArray()['broadcast']);
         $this->assertSame('ACTIVE', $report->toArray()['kill_switch']);
@@ -404,7 +408,7 @@ class MainnetPilotPreflightTest extends TestCase
         ]);
         $report = app(MainnetPilotPreflightChecker::class)->check();
         $this->assertFalse($report->checks['pilot_payment']['ready']);
-        $this->assertFalse($report->checks['no_existing_attempt']['ready']);
+        $this->assertTrue($report->checks['no_existing_attempt']['ready']);
 
         PaymentFeeDelegationAttempt::query()->delete();
         config(['services.fee_delegation.mainnet_staging.pilot_payment_id' => $old->id]);
@@ -485,6 +489,121 @@ class MainnetPilotPreflightTest extends TestCase
         Http::fake(['*' => Http::response([], 503)]);
         $this->artisan('mainnet:pilot-shutdown-check')->expectsOutputToContain('fee_payer_gates=NOT_VERIFIED')->assertFailed();
         $this->assertSame($before, $this->databaseRows());
+    }
+
+    public function test_mainnet_sponsorship_availability_follows_live_gate_state(): void
+    {
+        $url = '/api/payments/'.$this->payment->id.'/sponsorship';
+        $this->getJson($url)->assertOk()->assertExactJson(['available' => false]);
+        $this->assertSame('SHUTDOWN_VERIFIED', app(MainnetPilotGateStateChecker::class)->check()['state']);
+
+        config([
+            'blockchain.mainnet_activation_release_capable' => true,
+            'blockchain.profiles.kaia-mainnet.payment_execution_enabled' => true,
+            'blockchain.profiles.kaia-mainnet.fee_delegation_execution_enabled' => true,
+        ]);
+        $this->fakeReadOnlyServices(healthOverrides: ['activation_release_capable' => true]);
+        $this->assertSame('SAFE_DEPLOYED', app(MainnetPilotGateStateChecker::class)->check()['state']);
+        $this->getJson($url)->assertOk()->assertExactJson(['available' => false]);
+
+        $this->enableLiveGateForTest();
+        $this->fakeReadOnlyServices(healthOverrides: $this->liveHealth());
+        $liveState = app(MainnetPilotGateStateChecker::class)->check();
+        $this->assertSame('LIVE_ENABLED', $liveState['state'], json_encode($liveState['context']));
+        $this->getJson($url)->assertOk()->assertExactJson(['available' => true]);
+
+        config(['services.fee_delegation.self_hosted_mainnet.kill_switch' => true]);
+        $this->assertSame('ARMED_NOT_LIVE', app(MainnetPilotGateStateChecker::class)->check()['state']);
+        $this->getJson($url)->assertOk()->assertExactJson(['available' => false]);
+        config(['services.fee_delegation.self_hosted_mainnet.kill_switch' => false]);
+
+        foreach (['execution', 'signing', 'broadcast'] as $gate) {
+            $this->fakeReadOnlyServices(healthOverrides: $this->liveHealth([$gate => 'DISABLED']));
+            $this->getJson($url)->assertOk()->assertExactJson(['available' => false]);
+        }
+        $this->fakeReadOnlyServices(healthOverrides: $this->liveHealth(['kill_switch' => 'ACTIVE']));
+        $this->getJson($url)->assertOk()->assertExactJson(['available' => false]);
+        $this->fakeReadOnlyServices(healthOverrides: $this->liveHealth(['pilot_policy' => ['sender_address' => self::MERCHANT]]));
+        $this->getJson($url)->assertOk()->assertExactJson(['available' => false]);
+        $this->fakeReadOnlyServices(healthOverrides: $this->liveHealth(), healthStatus: 503);
+        $this->getJson($url)->assertOk()->assertExactJson(['available' => false]);
+        $this->fakeReadOnlyServices(healthOverrides: $this->liveHealth(), healthStatus: 500);
+        $this->getJson($url)->assertOk()->assertExactJson(['available' => false]);
+        $this->fakeReadOnlyServices(healthOverrides: $this->liveHealth(['status' => 'READ_ONLY_READY']));
+        $this->getJson($url)->assertOk()->assertExactJson(['available' => false]);
+        $this->fakeReadOnlyServices(healthOverrides: $this->liveHealth(['status' => 'malformed']));
+        $this->assertSame('NOT_VERIFIED', app(MainnetPilotGateStateChecker::class)->check()['state']);
+        $this->getJson($url)->assertOk()->assertExactJson(['available' => false]);
+
+        $this->fakeReadOnlyServices(healthOverrides: $this->liveHealth());
+        $this->payment->forceFill(['expires_at' => now()->subSecond()])->saveQuietly();
+        $this->getJson($url)->assertOk()->assertExactJson(['available' => false]);
+        $this->assertDatabaseCount('payment_fee_delegation_attempts', 0);
+        Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), '/sponsorship'));
+    }
+
+    public function test_live_availability_rejects_attempt_and_sender_mismatch_without_writes(): void
+    {
+        $this->enableLiveGateForTest();
+        $this->fakeReadOnlyServices(healthOverrides: $this->liveHealth());
+        $url = '/api/payments/'.$this->payment->id.'/sponsorship';
+        $before = $this->databaseRows();
+
+        $this->getJson($url)->assertOk()->assertExactJson(['available' => true]);
+        $this->assertSame($before, $this->databaseRows());
+
+        config(['services.fee_delegation.mainnet_staging.approved_sender_addresses' => self::MERCHANT]);
+        $this->getJson($url)->assertOk()->assertExactJson(['available' => false]);
+        config(['services.fee_delegation.mainnet_staging.approved_sender_addresses' => self::SENDER]);
+
+        config(['services.fee_delegation.mainnet_staging.pilot_payment_id' => $this->payment->id + 1]);
+        $this->getJson($url)->assertOk()->assertExactJson(['available' => false]);
+        config(['services.fee_delegation.mainnet_staging.pilot_payment_id' => $this->payment->id]);
+
+        PaymentFeeDelegationAttempt::create([
+            'payment_id' => $this->payment->id,
+            'requester_user_id' => $this->user->id,
+            'network' => 'kaia-mainnet',
+            'chain_id' => 8217,
+            'provider' => 'self-hosted',
+            'sender_address' => self::SENDER,
+            'sender_tx_hash' => '0x'.str_repeat('a', 64),
+            'request_fingerprint' => str_repeat('b', 64),
+            'state' => 'validated',
+            'sender_nonce' => '1',
+        ]);
+        $this->getJson($url)->assertOk()->assertExactJson(['available' => false]);
+        $this->assertDatabaseCount('payment_fee_delegation_attempts', 1);
+    }
+
+    private function enableLiveGateForTest(): void
+    {
+        config([
+            'blockchain.mainnet_activation_release_capable' => true,
+            'blockchain.profiles.kaia-mainnet.payment_execution_enabled' => true,
+            'blockchain.profiles.kaia-mainnet.fee_delegation_execution_enabled' => true,
+            'blockchain.payments_mainnet_enabled' => true,
+            'blockchain.mainnet_fee_delegation_enabled' => true,
+            'blockchain.mainnet_broadcast_enabled' => true,
+            'services.fee_delegation.enabled' => true,
+            'services.fee_delegation.url' => 'http://127.0.0.1:19000',
+            'services.fee_delegation.api_key' => 'test-only-key',
+            'services.fee_delegation.self_hosted_mainnet.enabled' => true,
+            'services.fee_delegation.self_hosted_mainnet.kill_switch' => false,
+        ]);
+    }
+
+    private function liveHealth(array $overrides = []): array
+    {
+        return array_replace_recursive([
+            'status' => 'READY',
+            'activation_release_capable' => true,
+            'balance_wei' => '20000000000000000',
+            'kill_switch' => 'INACTIVE',
+            'execution' => 'ENABLED',
+            'signing' => 'ENABLED',
+            'broadcast' => 'ENABLED',
+        ], $overrides);
     }
 
     private function identityRows(): array
@@ -624,11 +743,13 @@ class MainnetPilotPreflightTest extends TestCase
         );
     }
 
-    private function fakeReadOnlyServices(string $balance = '0.02'): void
+    private function fakeReadOnlyServices(string $balance = '0.02', array $healthOverrides = [], int $healthStatus = 200): void
     {
-        Http::fake(function (Request $request) use ($balance) {
+        Http::swap(new Factory);
+        Http::preventStrayRequests();
+        Http::fake(function (Request $request) use ($balance, $healthOverrides, $healthStatus) {
             if ($request->url() === 'http://127.0.0.1:19000/health') {
-                return Http::response([
+                return Http::response(array_replace_recursive([
                     'status' => 'READ_ONLY_READY',
                     'network' => 'kaia-mainnet',
                     'chain_id' => 8217,
@@ -651,7 +772,7 @@ class MainnetPilotPreflightTest extends TestCase
                         'merchant_address' => self::MERCHANT, 'sender_address' => self::SENDER,
                         'pilot_payment_id' => (string) config('services.fee_delegation.mainnet_staging.pilot_payment_id'),
                     ],
-                ]);
+                ], $healthOverrides), $healthStatus);
             }
 
             $result = match ($request['method']) {

@@ -46,17 +46,27 @@ abstract class KaiaFeeDelegationHttpGateway implements FeeDelegationGateway
             throw new PaymentSponsorshipException(
                 PaymentSponsorshipException::PROVIDER_STATUS_UNKNOWN,
                 externalMethod: 'signAsFeePayer',
-                previous: $exception
+                previous: $exception,
+                broadcastCertainty: BroadcastCertainty::BROADCAST_POSSIBLE
             );
         }
 
         if (strlen($response->body()) > self::MAX_RESPONSE_BYTES) {
-            throw $this->unknown($response);
+            throw new PaymentSponsorshipException(
+                PaymentSponsorshipException::PROVIDER_STATUS_UNKNOWN,
+                externalMethod: 'signAsFeePayer',
+                upstreamStatus: $response->status(),
+                broadcastCertainty: BroadcastCertainty::BROADCAST_POSSIBLE
+            );
         }
 
         if (! $response->successful()) {
+            $certainty = $this->certaintyFromResponse($response);
             if (! $this->managed()) {
-                $signerFailure = $this->preBroadcastSignerFailure($response);
+                $signerFailure = $this->preBroadcastSignerFailure(
+                    $response,
+                    $certainty
+                );
                 if ($signerFailure !== null) {
                     throw $signerFailure;
                 }
@@ -75,7 +85,8 @@ abstract class KaiaFeeDelegationHttpGateway implements FeeDelegationGateway
                     ? PaymentSponsorshipException::PROVIDER_REJECTED
                     : PaymentSponsorshipException::PROVIDER_STATUS_UNKNOWN,
                 externalMethod: 'signAsFeePayer',
-                upstreamStatus: $response->status()
+                upstreamStatus: $response->status(),
+                broadcastCertainty: $certainty
             );
         }
 
@@ -91,7 +102,8 @@ abstract class KaiaFeeDelegationHttpGateway implements FeeDelegationGateway
                 PaymentSponsorshipException::PROVIDER_STATUS_UNKNOWN,
                 externalMethod: 'signAsFeePayer',
                 upstreamStatus: $response->status(),
-                previous: $exception
+                previous: $exception,
+                broadcastCertainty: BroadcastCertainty::BROADCAST_POSSIBLE
             );
         }
 
@@ -107,6 +119,7 @@ abstract class KaiaFeeDelegationHttpGateway implements FeeDelegationGateway
         }
 
         $providerStatus = $body['status'] ?? null;
+        $certainty = $this->certaintyFromBody($body);
         $data = $body['data'] ?? null;
         $receiptStatus = is_array($data)
             ? $this->receiptStatus($data)
@@ -130,7 +143,8 @@ abstract class KaiaFeeDelegationHttpGateway implements FeeDelegationGateway
                     default => PaymentSponsorshipException::PROVIDER_STATUS_UNKNOWN,
                 },
                 externalMethod: 'signAsFeePayer',
-                upstreamStatus: $response->status()
+                upstreamStatus: $response->status(),
+                broadcastCertainty: $certainty
             );
         }
 
@@ -138,7 +152,8 @@ abstract class KaiaFeeDelegationHttpGateway implements FeeDelegationGateway
             throw new PaymentSponsorshipException(
                 PaymentSponsorshipException::PROVIDER_REVERTED,
                 externalMethod: 'signAsFeePayer',
-                upstreamStatus: $response->status()
+                upstreamStatus: $response->status(),
+                broadcastCertainty: $certainty
             );
         }
 
@@ -166,7 +181,8 @@ abstract class KaiaFeeDelegationHttpGateway implements FeeDelegationGateway
 
         return new FeeDelegationSubmission(
             strtolower($hash),
-            $response->status()
+            $response->status(),
+            BroadcastCertainty::SUBMITTED
         );
     }
 
@@ -218,12 +234,14 @@ abstract class KaiaFeeDelegationHttpGateway implements FeeDelegationGateway
         return new PaymentSponsorshipException(
             PaymentSponsorshipException::PROVIDER_STATUS_UNKNOWN,
             externalMethod: 'signAsFeePayer',
-            upstreamStatus: $response->status()
+            upstreamStatus: $response->status(),
+            broadcastCertainty: $this->certaintyFromResponse($response)
         );
     }
 
     private function preBroadcastSignerFailure(
-        Response $response
+        Response $response,
+        BroadcastCertainty $certainty
     ): ?PaymentSponsorshipException {
         try {
             $body = json_decode(
@@ -255,7 +273,37 @@ abstract class KaiaFeeDelegationHttpGateway implements FeeDelegationGateway
             PaymentSponsorshipException::SIGNER_PRE_BROADCAST_FAILED,
             externalMethod: 'signAsFeePayer',
             upstreamStatus: $response->status(),
-            diagnosticCode: strtolower($code)
+            diagnosticCode: strtolower($code),
+            broadcastCertainty: $certainty
         );
+    }
+
+    private function certaintyFromResponse(
+        Response $response
+    ): BroadcastCertainty {
+        try {
+            $body = json_decode(
+                $response->body(),
+                true,
+                64,
+                JSON_THROW_ON_ERROR
+            );
+        } catch (JsonException) {
+            return BroadcastCertainty::BROADCAST_POSSIBLE;
+        }
+
+        return $this->certaintyFromBody($body);
+    }
+
+    private function certaintyFromBody(mixed $body): BroadcastCertainty
+    {
+        if (! is_array($body)
+            || ($body['protocol_version'] ?? null) !== 2) {
+            return BroadcastCertainty::BROADCAST_POSSIBLE;
+        }
+
+        return BroadcastCertainty::fromProtocol(
+            $body['broadcast_certainty'] ?? null
+        ) ?? BroadcastCertainty::BROADCAST_POSSIBLE;
     }
 }

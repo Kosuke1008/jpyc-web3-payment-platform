@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Blockchain\MainnetPilotGateStateChecker;
 use App\Blockchain\NetworkExecutionDisabledException;
 use App\Blockchain\NetworkProfile;
 use App\Blockchain\NetworkProfileRegistry;
@@ -246,7 +247,8 @@ class PaymentController extends Controller
 
     public function sponsorshipAvailability(
         $id,
-        NetworkProfileRegistry $networks
+        NetworkProfileRegistry $networks,
+        MainnetPilotGateStateChecker $gateState
     ): JsonResponse {
         $payment = Payment::findOrFail($id);
 
@@ -254,15 +256,17 @@ class PaymentController extends Controller
             $snapshot = PaymentSnapshot::fromRecord($payment);
             $profile = $networks->get($snapshot->network);
             $active = $networks->active();
+            $available = $profile->chainId === $snapshot->chainId
+                && $active->id === $snapshot->network
+                && $this->feeDelegationAvailable($profile);
+            if ($snapshot->network === 'kaia-mainnet' && $available) {
+                $available = $gateState->check()['live'];
+            }
         } catch (Throwable) {
             return response()->json(['available' => false]);
         }
 
-        return response()->json([
-            'available' => $profile->chainId === $snapshot->chainId
-                && $active->id === $snapshot->network
-                && $this->feeDelegationAvailable($profile),
-        ]);
+        return response()->json(['available' => $available]);
     }
 
     private function feeDelegationAvailable(NetworkProfile $profile): bool

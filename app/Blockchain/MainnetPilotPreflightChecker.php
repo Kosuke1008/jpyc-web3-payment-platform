@@ -124,8 +124,13 @@ final class MainnetPilotPreflightChecker
         }
         $this->record($checks, 'pilot_payment', $paymentReady, $idReady ? 'pilot_payment_snapshot_or_relationship_invalid' : 'not_checked_without_valid_payment_id');
         try {
-            $noAttempts = $payment !== null && ! PaymentFeeDelegationAttempt::query()->exists();
-            $attemptDiagnostic = $payment === null ? 'not_checked_without_valid_payment' : 'pilot_attempt_already_exists';
+            $noAttempts = $payment !== null
+                && ! PaymentFeeDelegationAttempt::query()
+                    ->where('payment_id', $payment->id)
+                    ->exists();
+            $attemptDiagnostic = $payment === null
+                ? 'not_checked_without_valid_payment'
+                : 'pilot_attempt_already_exists';
         } catch (Throwable) {
             $noAttempts = false;
             $attemptDiagnostic = 'pilot_attempt_query_failed';

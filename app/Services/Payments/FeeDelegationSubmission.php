@@ -6,6 +6,7 @@ final readonly class FeeDelegationSubmission
 {
     public function __construct(
         public string $transactionHash,
-        public int $providerHttpStatus
+        public int $providerHttpStatus,
+        public BroadcastCertainty $broadcastCertainty = BroadcastCertainty::SUBMITTED
     ) {}
 }

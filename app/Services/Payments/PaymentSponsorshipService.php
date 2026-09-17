@@ -80,18 +80,26 @@ class PaymentSponsorshipService
             return $knownHash;
         }
 
+        $gatewayInvocationStarted = false;
+
         try {
             // Expiry and every runtime gate are checked again after the
             // durable attempt reservation and immediately before handoff.
             $latestSnapshot = $this->assertPaymentEligible(Payment::find($payment->id));
             $this->assertFeeDelegationEnabled($profile, $latestSnapshot);
             $this->mainnetPolicy->assertRuntimeGates($latestSnapshot, $provider);
+            $gatewayInvocationStarted = true;
             $submission = $this->gateway->sponsor(
                 $senderSignedTransaction,
                 (int) $payment->id,
                 $latestSnapshot->expiresAt->toIso8601String()
             );
         } catch (PaymentSponsorshipException $exception) {
+            if (! $gatewayInvocationStarted) {
+                $exception = $exception->withBroadcastCertainty(
+                    BroadcastCertainty::DEFINITELY_NOT_BROADCAST
+                );
+            }
             $state = match ($exception->reason) {
                 PaymentSponsorshipException::PROVIDER_REJECTED => FeeDelegationAttemptState::REJECTED,
                 PaymentSponsorshipException::PROVIDER_REVERTED => FeeDelegationAttemptState::REVERTED,

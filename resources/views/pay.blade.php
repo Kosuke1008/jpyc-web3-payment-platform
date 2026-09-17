@@ -13,8 +13,8 @@
         body {
             margin: 0;
             min-height: 100vh;
-            padding: 24px;
-            background: #f5f7fb;
+            padding: 24px 16px;
+            background: #f2f5f9;
             color: #111827;
             font-family:
                 -apple-system,
@@ -26,15 +26,38 @@
         .payment-container {
             width: 100%;
             max-width: 480px;
-            margin: 40px auto;
+            margin: 32px auto;
         }
 
         .payment-card {
-            padding: 28px 24px;
+            padding: 32px 28px;
             background: #ffffff;
-            border-radius: 18px;
-            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.08);
+            border: 1px solid #e5eaf1;
+            border-radius: 20px;
+            box-shadow: 0 16px 42px rgba(15, 23, 42, 0.08);
             text-align: center;
+        }
+
+        .brand {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 28px;
+            color: #163c7a;
+            font-size: 16px;
+            font-weight: 800;
+            letter-spacing: 0.02em;
+        }
+
+        .brand-mark {
+            display: inline-grid;
+            width: 30px;
+            height: 30px;
+            place-items: center;
+            border-radius: 9px;
+            background: #163c7a;
+            color: #ffffff;
+            font-size: 17px;
         }
 
         .label {
@@ -44,77 +67,139 @@
         }
 
         .store-name {
-            margin: 0 0 24px;
+            margin: 0 0 20px;
             font-size: 18px;
             font-weight: 600;
         }
 
         .amount {
             margin: 0;
-            font-size: 36px;
-            font-weight: 700;
+            font-size: clamp(40px, 10vw, 52px);
+            font-weight: 800;
+            letter-spacing: -0.04em;
+            line-height: 1.15;
         }
 
         .currency {
-            margin-left: 4px;
-            font-size: 18px;
+            margin-left: 5px;
+            color: #334155;
+            font-size: 19px;
+            font-weight: 700;
+            letter-spacing: 0;
         }
 
-        .expires-at {
-            margin-top: 12px;
-            color: #6b7280;
+        .payment-meta {
+            display: grid;
+            gap: 9px;
+            margin: 26px 0 0;
+            padding: 18px;
+            border: 1px solid #e8edf4;
+            border-radius: 12px;
+            background: #f8fafc;
+            text-align: left;
             font-size: 13px;
+        }
+
+        .payment-meta-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+        }
+
+        .payment-meta dt {
+            color: #64748b;
+        }
+
+        .payment-meta dd {
+            margin: 0;
+            color: #334155;
+            font-weight: 600;
+            text-align: right;
+        }
+
+        .wallet-guidance {
+            margin: 24px 0 0;
+            color: #475569;
+            font-size: 14px;
+            line-height: 1.7;
+            text-align: left;
         }
 
         button {
             width: 100%;
             min-height: 52px;
-            margin-top: 20px;
+            margin-top: 12px;
             padding: 12px 20px;
             border: none;
             border-radius: 12px;
-            background: #2563eb;
-            color: #ffffff;
-            font-size: 17px;
-            font-weight: 600;
+            background: #e8eef8;
+            color: #163c7a;
+            font-size: 15px;
+            font-weight: 700;
             cursor: pointer;
         }
 
         button:hover:not(:disabled) {
-            background: #1d4ed8;
+            background: #dae6f6;
         }
 
         button:disabled {
-            background: #9ca3af;
+            background: #e5e7eb;
+            color: #94a3b8;
             cursor: not-allowed;
-        }
-
-        .secondary-button {
-            margin-top: 12px;
-            background: #eef2ff;
-            color: #1d4ed8;
-        }
-
-        .secondary-button:hover:not(:disabled) {
-            background: #e0e7ff;
         }
 
         .wallet-launch-button {
             display: block;
             width: 100%;
-            min-height: 52px;
-            margin-top: 12px;
-            padding: 14px 20px;
+            min-height: 56px;
+            margin-top: 18px;
+            padding: 15px 20px;
             border-radius: 12px;
-            background: #111827;
+            background: #163c7a;
             color: #ffffff;
             font-size: 17px;
-            font-weight: 600;
+            font-weight: 800;
             text-decoration: none;
+            box-shadow: 0 7px 18px rgba(22, 60, 122, 0.2);
         }
 
         .wallet-launch-button:hover {
-            background: #1f2937;
+            background: #102f61;
+        }
+
+        .wallet-launch-button--disabled {
+            background: #9ca3af;
+            box-shadow: none;
+            cursor: not-allowed;
+        }
+
+        .secondary-button {
+            margin-top: 14px;
+            background: transparent;
+            color: #475569;
+            font-size: 14px;
+        }
+
+        .secondary-button:hover:not(:disabled) {
+            background: #f1f5f9;
+        }
+
+        .metamask-actions {
+            margin-top: 22px;
+            padding-top: 18px;
+            border-top: 1px solid #e8edf4;
+        }
+
+        .metamask-actions--hidden {
+            display: none;
+        }
+
+        .metamask-note {
+            margin: 10px 0 0;
+            color: #64748b;
+            font-size: 12px;
+            line-height: 1.6;
         }
 
         #status {
@@ -142,12 +227,36 @@
             font-size: 12px;
             word-break: break-all;
         }
+
+        @media (max-width: 520px) {
+            body {
+                padding: 16px 12px;
+            }
+
+            .payment-container {
+                margin: 8px auto;
+            }
+
+            .payment-card {
+                padding: 28px 20px;
+            }
+
+            .payment-meta-row {
+                align-items: baseline;
+            }
+        }
     </style>
 </head>
 
 <body>
+    @php($isMainnet = $paymentSnapshot->network === 'kaia-mainnet')
     <main class="payment-container">
         <section class="payment-card">
+            <div class="brand" aria-label="LivT">
+                <span class="brand-mark" aria-hidden="true">L</span>
+                <span>LivT</span>
+            </div>
+
             <p class="label">支払先</p>
 
             <p class="store-name">
@@ -159,23 +268,24 @@
                 <span class="currency">{{ $paymentSnapshot->tokenSymbol }}</span>
             </p>
 
-            <p class="expires-at">
-                有効期限：
-                {{ optional($paymentExpiresAt)->format('Y-m-d H:i:s') ?? '未設定' }}
-            </p>
+            <dl class="payment-meta">
+                <div class="payment-meta-row">
+                    <dt>ネットワーク</dt>
+                    <dd>{{ $isMainnet ? 'Kaia Mainnet' : $networkProfile->chainName }}</dd>
+                </div>
+                <div class="payment-meta-row">
+                    <dt>Payment ID</dt>
+                    <dd>{{ $payment->id }}</dd>
+                </div>
+                <div class="payment-meta-row">
+                    <dt>有効期限</dt>
+                    <dd>{{ optional($paymentExpiresAt)?->timezone('Asia/Tokyo')->format('Y-m-d H:i:s') ?? '未設定' }} JST</dd>
+                </div>
+            </dl>
 
-            <button id="connect-button" type="button">
-                MetaMaskを接続
-            </button>
-            
-            <p>
-                <small>
-                    ※ 支払うボタンを押してMetaMak起動後、もう一度支払うボタンを押してください。
-                </small>
-
-            <button id="pay-button" type="button">
-                {{ number_format((int) $paymentSnapshot->displayAmount) }} {{ $paymentSnapshot->tokenSymbol }}を支払う
-            </button>
+            @if ($isMainnet)
+                <p class="wallet-guidance">LivT Walletでログイン後、支払い内容を確認して端末内で署名します。</p>
+            @endif
 
             @if ($livtWalletPaymentUrl)
                 <a
@@ -185,7 +295,23 @@
                 >
                     LivT Walletで支払う
                 </a>
+            @elseif ($isMainnet)
+                <span class="wallet-launch-button wallet-launch-button--disabled" aria-disabled="true">
+                    LivT Walletで支払う
+                </span>
             @endif
+
+            <div class="metamask-actions{{ $isMainnet ? ' metamask-actions--hidden' : '' }}">
+                <button id="connect-button" type="button" @disabled($isMainnet)>
+                    MetaMaskを接続
+                </button>
+                <p class="metamask-note">
+                    MetaMaskアプリが開いた場合は、接続後にもう一度支払うボタンを押してください。
+                </p>
+                <button id="pay-button" type="button" @disabled($isMainnet)>
+                    {{ number_format((int) $paymentSnapshot->displayAmount) }} {{ $paymentSnapshot->tokenSymbol }}を支払う
+                </button>
+            </div>
 
             <button
                 id="history-button"
@@ -197,7 +323,7 @@
             </button>
 
             <p id="status" class="status-info">
-                ウォレットを接続してください
+                {{ $isMainnet ? 'LivT Walletで支払いを開始してください' : 'ウォレットを接続してください' }}
             </p>
 
             <p id="wallet-address" class="wallet-address"></p>
@@ -210,7 +336,7 @@
             networkProfileVersion: @json($paymentSnapshot->networkProfileVersion),
             chainId: @json((string) $paymentSnapshot->chainId),
             chainName: @json($networkProfile->chainName),
-            rpcUrl: @json($networkProfile->rpcUrl),
+            rpcUrl: @json($isMainnet ? null : $networkProfile->rpcUrl),
             currencyName: @json($networkProfile->currencyName),
             currencySymbol: @json($networkProfile->currencySymbol),
             explorerUrl: @json($networkProfile->explorerUrl),
@@ -300,7 +426,7 @@
                 return;
             }
 
-            if (!userToken) {
+            if (!userToken && TARGET_NETWORK !== "kaia-mainnet") {
                 showInfo(
                     "MetaMaskで支払う場合はLivTへのログインが必要です。"
                 );
