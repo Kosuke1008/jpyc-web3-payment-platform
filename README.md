@@ -1,155 +1,304 @@
-# LivT（Liv Terminal）
+# LivT
 
-LivTは、店舗でJPYC決済を受け付けるLaravelベースの決済プラットフォームです。
+LivTは、店舗がJPYCでQR決済を受け付けるための決済プラットフォームです。Laravelを決済の正本として、Paymentの作成、期限、支払条件、ブロックチェーン上の証拠、Fee Delegationの監査状態を管理します。
 
-POSでの決済作成から、ブロックチェーンtransactionの検証、DB上の決済確定までを
-一貫して管理します。現在のWeb3実証環境はKaia Kairosです。
+このリポジトリはバックエンドと店舗向けWeb画面を担当します。利用者の秘密鍵は保持せず、署名はMetaMaskまたは別リポジトリのLivT Wallet、ガス代の代理負担はLivT Fee Payerが担当します。
 
-新規Paymentは作成時のnetwork、chain ID、JPYC contract/symbol/decimals、店舗送金先、
-表示金額、atomic amount、有効期限を不変snapshotとして保存します。作成後にactive
-network、店舗Wallet、token設定が変わっても、既存Paymentの意味は変わりません。
+## LivTとは
 
-## 主な機能
+LivTが目指すのは、店舗が日本円建てステーブルコインJPYCを扱える、理解しやすく検証可能な決済基盤です。
 
-- スタッフ認証とPOS向け決済作成
-- 利用者認証と支払い履歴
-- 店舗Wallet・金額・有効期限を含むQR/URL決済
-- 既存MetaMask決済
-- 非カストディ型LivT Walletとの連携
-- LivT Fee PayerによるKairos gas代負担
-- receiptとJPYC `Transfer` eventのサーバー側検証
-- transaction・receipt・canonical blockの整合検査と確認証拠の保存
-- confirmed Paymentのread-only reconciliation
-- 重複tx hash、誤送金、期限切れ決済の拒否
+- 店舗スタッフがPOS画面からPaymentを作成
+- 支払い条件をQRまたはURLで利用者へ提示
+- 利用者が自分のWalletで署名
+- LaravelがreceiptとERC-20 `Transfer` eventを独立検証
+- 検証に成功したPaymentだけを`confirmed`に更新
+- Fee Delegation利用時も同じ最終検証を適用
+
+tx hashだけを支払い証明として信用せず、Payment作成時の不変snapshotとchain上の事実を照合します。
+
+## Mainnet実証
+
+2026年9月17日、Kaia Mainnetでself-hosted Fee Payerを利用した1 JPYCの決済に成功しました。
+
+| 項目 | 結果 |
+|---|---|
+| Network | Kaia Mainnet |
+| Chain ID | `8217` |
+| Token | JPYC |
+| JPYC contract | `0xE7C3D8C9a439feDe00D2600032D5dB0Be71C3c29` |
+| Amount | `1 JPYC` |
+| Fee Delegation | self-hosted LivT Fee Payer |
+| Fee Payer署名 | AWS KMS |
+| SenderのKAIA残高 | `0 KAIA` |
+| Receipt status | `1` |
+| Payment status | `confirmed` |
+| Confirmed block | `227448108` |
+| Fee Payer gas cost | `0.00187957 KAIA` |
+| Transaction | [`0xc045…9779`](https://kaiascan.io/ja/tx/0xc045b4894d6e6bbd4178422dc63bd36ecf5eee9478ad393cc1f150b942ef9779) |
+
+これは制御された1件のpilot実証です。一般公開された無制限のMainnet決済サービスや、本番運用の完了を意味するものではありません。
+
+## システム構成
+
+```mermaid
+flowchart LR
+    Store[店舗 / POS] -->|Payment作成・QR| LivT[LivT Laravel]
+    LivT -->|Payment Request| Wallet[LivT Wallet]
+    Wallet -->|端末内sender署名| LivT
+    LivT -->|認証済みsponsor要求| FP[LivT Fee Payer]
+    FP -->|digest署名要求| KMS[AWS KMS]
+    FP -->|fee payer署名済みtx| Kaia[Kaia Network]
+    Kaia -->|receipt / Transfer event| LivT
+    LivT -->|confirmed| Store
+```
+
+- **LivT**: Payment正本、認証、検証、監査、運用gate
+- **LivT Wallet**: 利用者鍵の暗号化保存、端末内署名、支払い確認UI
+- **LivT Fee Payer**: transaction policy、AWS KMS署名、1回だけのbroadcast、receipt監視
 
 ## 決済フロー
 
-```text
-POS
-  └─ pending決済を作成
-       ↓ payment ID / URL
-MetaMask または LivT Wallet
-  └─ 利用者がtransactionへ署名・送信
-       ↓ transaction hash
-LivT Laravel
-  ├─ chain IDとreceiptをRPCから取得
-  ├─ JPYC contract・送金先・金額・statusを検証
-  └─ 検証成功後だけDBをconfirmedへ更新
-```
+1. 店舗スタッフがPOSから金額を指定し、Laravelが`pending` Paymentを作成します。
+2. Laravelはnetwork、chain ID、token、recipient、表示金額、atomic amount、有効期限をPayment snapshotへ固定します。
+3. 支払いページがPayment IDを含むLivT Wallet導線またはMetaMask導線を表示します。
+4. WalletはLaravelからPayment Requestを取得し、snapshot、期限、利用者、残高を検査します。
+5. 利用者が確認後、Wallet内でsender transactionへ署名します。
+6. Fee DelegationではLaravelがpilot guardとallowlistを検査し、attemptを監査記録へ予約します。
+7. Fee Payerがtransactionを再検証し、AWS KMSでfee payer署名を追加してKaiaへ送信します。
+8. Laravelがreceipt、canonical block、JPYC `Transfer` eventを検証します。
+9. すべて一致した場合だけPaymentを`confirmed`にし、確認証拠を保存します。
 
-LivT WalletのFee Delegated決済では、送信前にLaravelがsender署名済みtransactionを
-検査し、同一ホストのLivT Fee Payerへ追加署名とbroadcastを依頼します。最終確定は
-MetaMaskと同じ共通verifierを利用します。
+## Payment snapshot
 
-## セキュリティ方針
+各Paymentは作成時の支払条件を保持します。
 
-- clientが申告する「成功」を信用しません。
-- tx hashだけでは支払い完了と判定しません。
-- chain、receipt status、JPYC contract、送金先、金額、重複利用を検証します。
-- RPC検証が完了するまでDB transactionやrow lockを保持しません。
-- Walletのmnemonic、秘密鍵、パスワード、復号済み情報を受け取りません。
-- Fee Payer秘密鍵はLaravelで保持しません。
-- RPC・receipt・Transfer検証に失敗した場合、paymentはpendingのまま維持します。
+- network profile version
+- network / chain ID
+- token contract / symbol / decimals
+- recipient address
+- display amount / atomic amount
+- expiration
 
-## 対応する支払い方式
+後からactive networkや店舗Walletの設定が変わっても、既存Paymentの意味を設定値から再構成しません。snapshotを持たない、または整合しないPaymentはfail-closedで拒否します。
 
-| 方式 | 署名・gas負担 | 最終確認 |
-|:---|:---|:---|
-| MetaMask | MetaMask利用者 | 共通`PaymentTransactionVerifier` |
-| LivT Wallet直接送信 | Wallet利用者 | 共通`PaymentTransactionVerifier` |
-| LivT Wallet Fee Delegated | senderはWallet、gasはLivT Fee Payer | 共通`PaymentTransactionVerifier` |
+## Payment Transaction Verification
+
+最終確定は`PaymentTransactionVerifier`が担当します。少なくとも次を照合します。
+
+- networkとchain ID
+- receipt status
+- transaction hashとreceipt hash
+- JPYC contract
+- ERC-20 `Transfer` eventの送信先とatomic amount
+- 必要な場合のpayer/sender
+- canonical block hashとfinality条件
+- 同じtx hashの重複利用
+- Paymentの期限・状態・snapshot
+
+確認成功時はblock number/hash、receipt status、payer address、Transfer log index、chain timestamp、検証時刻などを保存します。RPC障害や不一致ではPaymentを成功扱いしません。
+
+## Fee Delegation
+
+Fee Delegationでは、利用者がJPYCを保有していれば、KAIAを保有していなくても支払いできます。
+
+- Walletが`FeeDelegatedSmartContractExecution`のsender部分をローカル署名
+- Laravelが認証・Payment・allowlist・attemptを検査
+- self-hosted Fee Payerがpolicyを再検証
+- AWS KMSがFee Payer署名を生成
+- Fee Payerが1回だけbroadcast
+- Laravelの共通verifierが最終確定
+
+Mainnetでは直接送信へ自動fallbackしません。
+
+### Fee Delegation Attempt監査
+
+`payment_fee_delegation_attempts`は、Paymentごとのrequest fingerprint、sender tx hash、nonce、provider、状態、HTTP診断、送信・receipt観測・解決時刻を記録します。Payment ID、sender transaction、request fingerprintの重複をDB制約とservice logicで防ぎます。
+
+履歴は削除や上書きによる再利用を前提とせず、確定的なpre-broadcast拒否、結果不明、submittedを区別して扱います。
+
+### Broadcast Certainty protocol v2
+
+Fee Payer protocol v2の`broadcast_certainty`をLaravel内部で保守的に解析します。
+
+| 値 | 意味 |
+|---|---|
+| `definitely_not_broadcast` | broadcast前の失敗であることを確認できる |
+| `broadcast_possible` | RPCへ到達した可能性を否定できない |
+| `submitted` | RPCが期待したtx hashを受理した |
+
+protocol versionの欠落、不明なenum、壊れたJSON、timeoutなどは`broadcast_possible`として扱います。この内部情報は公開APIへ露出しません。現時点ではcertaintyの永続化と永続replay claimへの統合は今後の課題です。
+
+## Mainnet pilotの安全設計
+
+Mainnet経路は複数の独立した条件が一致した場合だけ利用可能になります。
+
+- `kaia-mainnet` profileとchain ID `8217`
+- 承認済みJPYC contractと完全一致する1 JPYC snapshot
+- 専用Mainnet staging環境・DB識別子
+- Store / Staff / User / Walletの単一pilot identity set
+- merchant / sender / Fee Payerの分離とallowlist
+- LaravelとFee Payer双方のexecution/signing/broadcast gate
+- LaravelとFee Payer双方のkill switch
+- loopback限定のFee Payer health確認
+- pilot Payment ID、期限、attempt数、残高、gas上限、gas price上限
+- operatorによる明示的な確認
+
+readiness、preflight、gate statusは「安全に実行できる条件」を検査するもので、単独では署名やbroadcastを実行しません。通常時はkill switchをactiveに保ちます。
+
+## 対応ネットワーク
+
+| Network | Chain ID | 用途 |
+|---|---:|---|
+| Kaia Kairos | `1001` | 開発・E2E・手動レビュー |
+| Kaia Mainnet | `8217` | gate付きpilot実証 |
+
+どちらも承認済みJPYC metadataをnetwork profileから解決します。networkは`APP_ENV`から推測せず、明示設定します。
 
 ## 主なAPI
 
-```text
-POST /api/staff/login
-POST /api/user/login
-POST /api/payments/create
-GET  /api/payments/{id}
-GET  /api/payments/{id}/sponsorship
-POST /api/payments/{id}/sponsor
-POST /api/payments/{id}/confirm
-GET  /api/user/payments
-```
+| Method | Endpoint | 用途 |
+|---|---|---|
+| `POST` | `/api/staff/login` | 店舗スタッフ認証 |
+| `POST` | `/api/user/register` | 利用者登録 |
+| `POST` | `/api/user/login` | 利用者認証 |
+| `POST` | `/api/payment/login` | Payment限定の短時間認証 |
+| `POST` | `/api/payments/create` | スタッフによるPayment作成 |
+| `GET` | `/api/payments/{id}` | snapshotに基づく支払い内容取得 |
+| `GET` | `/api/payments/{id}/sponsorship` | read-onlyなFee Delegation可否 |
+| `POST` | `/api/payments/{id}/sponsor` | 認証済みsender transactionのsponsor要求 |
+| `POST` | `/api/payments/{id}/confirm` | transactionの検証とPayment確定 |
+| `GET` | `/api/payments/status/{id}` | Payment状態確認 |
+| `GET` | `/api/user/payments` | 利用者の決済履歴 |
 
-`GET /api/payments/{id}`の支払い条件（`network`、`chain_id`、
-`token_contract`、`token_decimals`、`recipient_address`、`display_amount`、
-`atomic_amount`、`expires_at`）はPayment snapshotから返します。snapshotを持たない
-legacy Paymentを現在設定から推測することはせず、安全に表示・検証できない場合は拒否します。
+認証が必要なendpointはLaravel Sanctumのabilityとrate limitを組み合わせています。
 
-確認成功時はtx hash、観測chain ID、block number/hash、receipt status、実payer、
-Transfer log index、block timestamp、検証時刻をPaymentへ保存します。`paid_at`はLivTが
-確認を受理した時刻、`chain_confirmed_at`はchain上のblock timestampです。
+## Database
 
-## 技術構成
+| Table | 役割 |
+|---|---|
+| `stores` | 店舗とstore code、認証情報 |
+| `staffs` | 店舗に紐づくスタッフ |
+| `users` | 利用者と承認sender wallet address |
+| `wallets` | 店舗の受取addressとnetwork |
+| `payments` | 金額、状態、snapshot、確認・reconciliation証拠 |
+| `payment_fee_delegation_attempts` | Fee Delegation要求と送信状態の監査 |
+| `personal_access_tokens` | Sanctum token |
+| `sessions` | Web session |
 
-- Laravel / PHP
-- MySQL
+MySQL側のNOT NULL、CHECK、unique constraintも安全境界の一部です。アプリケーションテストの都合でこれらを弱めない方針です。
+
+## 技術スタック
+
+- PHP 8.3以降 / Laravel 13
 - Laravel Sanctum
-- Blade / JavaScript / ethers.js
-- Kaia Kairos RPC
-- JPYC ERC-20
+- MySQL 8
+- Blade / JavaScript / ethers.js（MetaMask互換画面）
+- `web3p/web3.php`
+- PHPUnit 12 / Laravel Pint
 
-## 開発・テスト
+## 開発環境
 
-環境変数は`.env.example`を参照し、秘密情報をGitへcommitしないでください。
-
-Blockchain networkは`APP_ENV`から推測せず、明示的に選びます。既存のKairos
-実行には次を設定します。`kaia-mainnet` profileも解決できますが、Phase 4でも
-決済作成とFee Delegationをコード上で無効にしています。
-
-```dotenv
-BLOCKCHAIN_NETWORK=kairos
-BLOCKCHAIN_KAIROS_RPC_URL=https://public-en-kairos.node.kaia.io
-PAYMENTS_MAINNET_ENABLED=false
-MAINNET_FEE_DELEGATION_ENABLED=false
-MAINNET_BROADCAST_ENABLED=false
-```
+必要なものはPHP、Composer、MySQL、Node.js/npm、PDO MySQL・BCMath・IntlなどのPHP extensionです。
 
 ```bash
 composer install
-php artisan test
+npm install
+cp .env.example .env
+php artisan key:generate
+php artisan migrate
+composer run dev
+```
+
+`.env`には開発用DBとnetworkを設定します。秘密値、RPC credential、Fee Payer API key、AWS情報はcommitしないでください。既存DBへの`migrate:fresh`は全データを削除するため、専用の空DB以外では実行しないでください。
+
+## テスト
+
+現在のhardeningを正しく検証するには専用MySQL DBを使用します。
+
+```bash
+vendor/bin/phpunit -c phpunit.mysql.xml
+
 vendor/bin/pint --test
+git diff --check
 ```
 
-保存済み確認証拠は、transactionを送信しない次のcommandで再照合できます。
+`phpunit.mysql.xml`はDB名を`livt_test`へ固定し、テスト基底クラスも実接続先を確認します。`livt_local`、Mainnet staging、production DBをテスト先にしてはいけません。DB passwordはtracked fileへ書かず、実行前にprocess environmentへ設定します。
+
+## 運用コマンド
+
+次はすべて用途を理解したoperator向けです。
 
 ```bash
-php artisan payments:reconcile 123
-```
+# 保存済み確認証拠のread-only再照合
+php artisan payments:reconcile <payment-id>
 
-Legacy PaymentのMainnet移行監査（既定はread-only）:
-
-```bash
+# Mainnet migration監査
 php artisan payments:audit-mainnet-migration
-```
 
-Kaia Mainnetのread-only RPC readiness:
-
-```bash
+# read-only readiness / staging readiness / pilot preflight
 php artisan blockchain:mainnet-readiness
+php artisan blockchain:mainnet-staging-readiness
+php artisan blockchain:mainnet-pilot-preflight
+
+# localとFee Payerのgate状態確認
+php artisan mainnet:pilot-gate-status
 ```
 
-必要な分離設定と実行順序は`docs/mainnet-readiness-runbook.md`を参照してください。readiness成功時もMainnet Payment、署名、Fee Delegation、broadcastは無効です。
+Mainnet用のsetup、Payment作成、期限切れPayment置換、credential/sender rotationコマンドには環境・DB・identity・lock・kill switchのguardがあります。実行前に`docs/mainnet-1-jpyc-pilot-runbook.md`と各runbookを確認してください。
 
-## 関連リポジトリ
+## Mainnet運用上の注意
 
-- `livt-wallet`: React/TypeScript製の非カストディ型ブラウザWallet
-- `livt-fee-payer`: Kairos用のセルフホスト型Fee Payer sidecar
+- gateを開くこととtransactionを送ることを同じ手順にしない
+- readinessとpreflightをread-only状態で先に確認する
+- operatorがPayment ID、merchant、sender、Fee Payer、残高上限を照合する
+- live windowを必要最小限にし、終了後は双方のkill switchを戻す
+- `broadcast_possible`や`submitted`を再送しない
+- DB行やattemptを手動削除して再試行しない
+- transaction後はreceiptとPayment evidenceを確認する
+
+Mainnet実行手順をREADMEだけから安易に行うことは想定していません。詳細はレビュー済みrunbookを使用してください。
+
+## 現在の到達点
+
+- Kairos / Kaia Mainnet network profile
+- immutable Payment snapshotとhardened MySQL schema
+- receipt / Transfer / finality verification
+- MetaMask互換フローとLivT Wallet連携
+- self-hosted Fee DelegationとAWS KMS Mainnet署名
+- Mainnet readiness / preflight / gate status
+- pilot allowlist、kill switch、gas・残高budget
+- Fee Delegation Attempt監査
+- Fee Payer protocol v2 broadcast certaintyの保守的解析
+- Kaia Mainnet 1 JPYC pilot成功
+
+## 既知の課題
+
+- 成功したMainnet Paymentは`confirmed`になりましたが、対応するFee Delegation Attemptは`submitted`のままで、`receipt_observed_at`と`resolved_at`が未設定でした。決済自体の失敗ではなく、Payment確定後にattempt監査stateを追従させる処理の課題です。DBを手動更新せず、resolverとstate transitionとして解決します。
+- broadcast certaintyは現在Laravel内部で伝播しますが、DB永続化と永続replay claimへの統合は未完了です。
+- pilotは単一Payment・単一allowlistを前提とし、一般的な複数店舗運用には未拡張です。
+
+## Roadmap
+
+- 永続replay claimとbroadcast certaintyの統合
+- Payment confirmed時のattempt state自動追従
+- 複数Payment・複数店舗向けbudget/rate policy
+- WebAuthn / passkey / 生体認証を使ったWallet UX
+- 安全な鍵backup・account recovery
+- 実店舗での段階的な運用実証とmonitoring
+- Polygonなど追加networkの調査（実装済みではありません）
+
+## Related repositories
+
+- `livt-wallet`: React/TypeScript製のnon-custodial Wallet
+- `livt-fee-payer`: Kaia Fee DelegationとAWS KMS署名を担当するself-hosted service
 
 ## ドキュメント
 
-- `docs/livt-wallet-integration-plan.md`: 段階的なWallet統合計画
-- `docs/livt-wallet-payment-flow.md`: 支払い工程と実装箇所
-- `docs/kairos-fee-delegation-proof.md`: Kairos Fee Delegation実証手順
-- `docs/kairos-fee-payer-review.md`: 3リポジトリ横断のレビュー資料
-- `docs/mainnet-migration-plan.md`: Kaia Mainnet移行の段階設計
-
-## 現在の範囲
-
-Fee Payer機能はKairos実証限定です。Mainnetでは、KMS/HSM、永続的な冪等性、
-利用上限、監査ログ、残高監視、緊急停止を追加するまで有効化しません。
-Phase 1でNetwork Profile、Phase 2でPayment Snapshot、Phase 3でConfirmation
-Evidence / Kaia Finality検証、Phase 4でDB hardeningとread-only readinessを実装しました。Mainnetでは
-決済作成、confirmation、Wallet署名、Fee Delegation、broadcastを引き続き無効にしており、
-Mainnet対応完了または本番readyではありません。
+- `docs/mainnet-migration-plan.md`: 段階的Mainnet移行計画
+- `docs/mainnet-readiness-runbook.md`: read-only readiness
+- `docs/mainnet-staging-runbook.md`: Mainnet staging構築
+- `docs/mainnet-1-jpyc-pilot-runbook.md`: 制御された1 JPYC pilot
+- `docs/self-hosted-mainnet-fee-payer-runbook.md`: self-hosted Fee Payer運用
+- `docs/external-signer-runbook.md`: AWS KMS signer運用
+- `docs/livt-wallet-payment-flow.md`: Wallet連携の決済フロー
