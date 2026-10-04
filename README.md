@@ -127,21 +127,21 @@ Fee Payer protocol v2の`broadcast_certainty`をLaravel内部で保守的に解�
 | `broadcast_possible` | RPCへ到達した可能性を否定できない |
 | `submitted` | RPCが期待したtx hashを受理した |
 
-protocol versionの欠落、不明なenum、壊れたJSON、timeoutなどは`broadcast_possible`として扱います。この内部情報は公開APIへ露出しません。現時点ではcertaintyの永続化と永続replay claimへの統合は今後の課題です。
+protocol versionの欠落、不明なenum、壊れたJSON、timeoutなどは`broadcast_possible`として扱います。この内部情報は公開APIへ露出せず、attemptへ永続化して再送を禁止します。
 
 ## Mainnet pilotの安全設計
 
 Mainnet経路は複数の独立した条件が一致した場合だけ利用可能になります。
 
 - `kaia-mainnet` profileとchain ID `8217`
-- 承認済みJPYC contractと完全一致する1 JPYC snapshot
+- 承認済みJPYC contractと設定上限内の正整数JPYC snapshot
 - 専用Mainnet staging環境・DB識別子
 - Store / Staff / User / Walletの単一pilot identity set
 - merchant / sender / Fee Payerの分離とallowlist
 - LaravelとFee Payer双方のexecution/signing/broadcast gate
 - LaravelとFee Payer双方のkill switch
 - loopback限定のFee Payer health確認
-- pilot Payment ID、期限、attempt数、残高、gas上限、gas price上限
+- Paymentごとの変更不能なMainnet認可、期限、attempt数、残高、gas上限、gas price上限
 - operatorによる明示的な確認
 
 readiness、preflight、gate statusは「安全に実行できる条件」を検査するもので、単独では署名やbroadcastを実行しません。通常時はkill switchをactiveに保ちます。
@@ -171,7 +171,7 @@ readiness、preflight、gate statusは「安全に実行できる条件」を検
 | `GET` | `/api/payments/status/{id}` | Payment状態確認 |
 | `GET` | `/api/user/payments` | 利用者の決済履歴 |
 
-認証が必要なendpointはLaravel Sanctumのabilityとrate limitを組み合わせています。
+認証が必要なendpointはLaravel Sanctumのabilityとrate limitを組み合わせています。公開loginは失敗時だけを計数し、送信元IPは30回/分、同一の認証識別子＋IPは5回/分に制限します。利用者の通常loginとPayment限定loginは同じ枠を共有し、さらに同一利用者は送信元をまたいで20回/10分、同一店舗スタッフは10回/10分までです。rate-limit用cache keyにはemail、store code、staff IDの生値ではなくSHA-256 fingerprintを使用します。
 
 ## Database
 
@@ -275,14 +275,13 @@ Mainnet実行手順をREADMEだけから安易に行うことは想定してい�
 ## 既知の課題
 
 - 成功したMainnet Paymentは`confirmed`になりましたが、対応するFee Delegation Attemptは`submitted`のままで、`receipt_observed_at`と`resolved_at`が未設定でした。決済自体の失敗ではなく、Payment確定後にattempt監査stateを追従させる処理の課題です。DBを手動更新せず、resolverとstate transitionとして解決します。
-- broadcast certaintyは現在Laravel内部で伝播しますが、DB永続化と永続replay claimへの統合は未完了です。
-- pilotは単一Payment・単一allowlistを前提とし、一般的な複数店舗運用には未拡張です。
+- Fee Payer側のPayment/fingerprint replay claimはprocess内Mapであり、再起動をまたぐ永続ledgerではありません。Laravel DBのattemptが永続的な正本です。
+- 単一allowlist店舗からの複数Paymentには対応しましたが、一般的な複数店舗運用には未拡張です。
 
 ## Roadmap
 
-- 永続replay claimとbroadcast certaintyの統合
 - Payment confirmed時のattempt state自動追従
-- 複数Payment・複数店舗向けbudget/rate policy
+- 複数店舗向けbudget/rate policy
 - WebAuthn / passkey / 生体認証を使ったWallet UX
 - 安全な鍵backup・account recovery
 - 実店舗での段階的な運用実証とmonitoring

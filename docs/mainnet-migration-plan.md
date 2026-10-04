@@ -78,7 +78,7 @@ flowchart LR
 | `tests/Feature/PaymentSponsorshipTest.php` | Kairos RLPと現在のcache reservationを前提にする。 |
 | `.env.example`、`README.md`、`docs/kairos-*`、`docs/livt-wallet-*` | 現在の変数名とKairos限定手順を記載。既存のKairos証跡は削除せず、Mainnet計画から参照する。 |
 
-`composer.lock`や`public/js/ethers.umd.min.js`にも検索上の文字列は存在するが、network profile導入の変更対象ではない。
+`composer.lock`にも検索上の文字列は存在するが、network profile導入の変更対象ではない。
 
 ### 2.2 livt-wallet
 

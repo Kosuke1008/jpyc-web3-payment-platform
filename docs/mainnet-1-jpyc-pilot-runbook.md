@@ -47,6 +47,7 @@ MAINNET_STAGING_MERCHANT_ADDRESS=<exact pilot merchant>
 MAINNET_STAGING_APPROVED_USER_IDS=<exactly one positive ID>
 MAINNET_STAGING_APPROVED_SENDER_ADDRESSES=<exactly one sender>
 MAINNET_PILOT_PAYMENT_ID=<set only after Phase 3>
+MAINNET_PAYMENT_AUTHORIZATION_KEY=<same dedicated 32-byte hex secret in Laravel and Fee Payer>
 MAINNET_PILOT_MAX_FEE_PAYER_BALANCE_KAIA=<tiny approved cap>
 PAYMENT_EXPIRATION_SECONDS=21600
 KAIA_FEE_DELEGATION_MAX_GAS=<same approved gas cap>
@@ -64,6 +65,9 @@ SELF_HOSTED_MAINNET_DAILY_KAIA_BUDGET=<max_gas * max_gas_price, in KAIA>
 FEE_PAYER_MIN_RESERVE_KAIA=<approved reserve greater than zero>
 ```
 
+`MAINNET_PAYMENT_AUTHORIZATION_KEY`はAPI keyやKMS keyと分離し、secret managerで生成・配布する。
+readinessには不可逆なfingerprintだけを出し、値そのものをログ・コマンド出力へ含めない。
+
 Fee Payer additionally requires two different commercial Mainnet RPCs, its
 loopback API secret, the KMS-derived public address, signer backend `aws-kms`,
 AWS region/KMS key reference, and the Roles Anywhere/instance-role credential
@@ -79,14 +83,16 @@ The conservative arithmetic is exact integer arithmetic:
 
 ```text
 max_transaction_fee_wei = max_gas * max_gas_price_wei
-minimum_required_balance_wei = max_transaction_fee_wei + minimum_reserve_wei
+minimum_transaction_balance_wei = max_transaction_fee_wei + minimum_reserve_wei
+minimum_required_balance_wei = daily_kaia_budget_wei + minimum_reserve_wei
 maximum_allowed_balance_wei = configured pilot maximum
 recommended_top_up_wei = max(0, minimum_required_balance_wei - current_balance_wei)
 ```
 
-Set the daily KAIA budget to exactly one maximum transaction fee. Set the
-maximum balance no lower than fee plus reserve and no higher than the separately
-approved tiny funding cap. The application rejects inconsistent values.
+Set the daily KAIA budget to the approved number of transactions multiplied by
+one maximum transaction fee. Set the maximum balance no lower than that daily
+budget plus reserve and no higher than the separately approved funding cap. The
+application rejects inconsistent values.
 
 ## Tomorrow's controlled sequence
 
