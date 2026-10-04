@@ -13,26 +13,9 @@ final class MainnetPilotRpc
     /** Observe the same canonical block on both providers. No fallback or RPC writes. */
     public function balance(string $address): array
     {
-        [$primary, $secondary] = $this->providers();
-        $heights = array_map(fn ($url) => $this->quantity($this->rpc($url, 'eth_blockNumber')), [$primary, $secondary]);
-        $primaryLower = bccomp($heights[0], $heights[1], 0) <= 0;
-        $height = $primaryLower ? $heights[0] : $heights[1];
-        $lag = bcsub($primaryLower ? $heights[1] : $heights[0], $height, 0);
-        $maxLag = MainnetPilotLimits::integer(config('blockchain.mainnet_readiness_max_block_lag'));
-        if (bccomp($lag, $maxLag, 0) > 0) {
-            throw new RuntimeException('pilot_rpc_height_divergence');
-        }
-        $tag = '0x'.gmp_strval(gmp_init($height, 10), 16);
-        $hash = null;
+        [$providers, $tag, $height, $hash] = $this->canonicalBlock();
         $balances = [];
-        foreach ([$primary, $secondary] as $url) {
-            $block = $this->rpc($url, 'eth_getBlockByNumber', [$tag, false]);
-            if (! is_array($block) || $this->quantity($block['number'] ?? null) !== $height
-                || ! is_string($block['hash'] ?? null) || preg_match('/\A0x[0-9a-fA-F]{64}\z/', $block['hash']) !== 1
-                || ($hash !== null && $hash !== strtolower($block['hash']))) {
-                throw new RuntimeException('pilot_rpc_canonical_block_mismatch');
-            }
-            $hash = strtolower($block['hash']);
+        foreach ($providers as $url) {
             $balances[] = $this->quantity($this->rpc($url, 'eth_getBalance', [$address, $tag]));
         }
         if ($balances[0] !== $balances[1]) {
@@ -42,12 +25,39 @@ final class MainnetPilotRpc
         return ['balance_wei' => $balances[0], 'balance_block_number' => $height, 'balance_block_hash' => $hash];
     }
 
-    /** Match the wallet's unsigned ERC20 estimate + its explicit delegated intrinsic overhead. */
-    public function gas(string $sender, string $merchant): array
+    /** Read the sender's JPYC balance at the same canonical block on both providers. */
+    public function tokenBalance(string $address): array
     {
         $profile = $this->networks->active();
+        [$providers, $tag, $height, $hash] = $this->canonicalBlock();
+        $data = '0x70a08231'.str_pad(substr($address, 2), 64, '0', STR_PAD_LEFT);
+        $balances = [];
+        foreach ($providers as $url) {
+            $balances[] = $this->word($this->rpc($url, 'eth_call', [[
+                'to' => $profile->jpycContract,
+                'data' => $data,
+            ], $tag]));
+        }
+        if ($balances[0] !== $balances[1]) {
+            throw new RuntimeException('pilot_rpc_token_balance_disagreement');
+        }
+
+        return [
+            'sender_jpyc_atomic' => $balances[0],
+            'sender_jpyc_block_number' => $height,
+            'sender_jpyc_block_hash' => $hash,
+        ];
+    }
+
+    /** Match the wallet's unsigned ERC20 estimate + its explicit delegated intrinsic overhead. */
+    public function gas(string $sender, string $merchant, string $atomicAmount = '1000000000000000000'): array
+    {
+        $profile = $this->networks->active();
+        if (preg_match('/\A[1-9][0-9]*\z/', $atomicAmount) !== 1) {
+            throw new RuntimeException('pilot_gas_amount_invalid');
+        }
         $data = '0xa9059cbb'.str_pad(substr($merchant, 2), 64, '0', STR_PAD_LEFT)
-            .str_pad(gmp_strval(gmp_init('1000000000000000000', 10), 16), 64, '0', STR_PAD_LEFT);
+            .str_pad(gmp_strval(gmp_init($atomicAmount, 10), 16), 64, '0', STR_PAD_LEFT);
         $estimates = [];
         $prices = [];
         foreach ($this->providers() as $url) {
@@ -63,6 +73,7 @@ final class MainnetPilotRpc
         }
 
         return [
+            'observed_transfer_atomic_amount' => $atomicAmount,
             'primary_estimated_execution_gas' => $estimates[0],
             'secondary_estimated_execution_gas' => $estimates[1],
             'fee_delegation_intrinsic_gas' => '10000',
@@ -89,11 +100,38 @@ final class MainnetPilotRpc
         return $urls;
     }
 
+    /** @return array{array{string, string}, string, string, string} */
+    private function canonicalBlock(): array
+    {
+        $providers = $this->providers();
+        $heights = array_map(fn ($url) => $this->quantity($this->rpc($url, 'eth_blockNumber')), $providers);
+        $primaryLower = bccomp($heights[0], $heights[1], 0) <= 0;
+        $height = $primaryLower ? $heights[0] : $heights[1];
+        $lag = bcsub($primaryLower ? $heights[1] : $heights[0], $height, 0);
+        $maxLag = MainnetPilotLimits::integer(config('blockchain.mainnet_readiness_max_block_lag'));
+        if (bccomp($lag, $maxLag, 0) > 0) {
+            throw new RuntimeException('pilot_rpc_height_divergence');
+        }
+        $tag = '0x'.gmp_strval(gmp_init($height, 10), 16);
+        $hash = null;
+        foreach ($providers as $url) {
+            $block = $this->rpc($url, 'eth_getBlockByNumber', [$tag, false]);
+            if (! is_array($block) || $this->quantity($block['number'] ?? null) !== $height
+                || ! is_string($block['hash'] ?? null) || preg_match('/\A0x[0-9a-fA-F]{64}\z/', $block['hash']) !== 1
+                || ($hash !== null && $hash !== strtolower($block['hash']))) {
+                throw new RuntimeException('pilot_rpc_canonical_block_mismatch');
+            }
+            $hash = strtolower($block['hash']);
+        }
+
+        return [$providers, $tag, $height, $hash];
+    }
+
     private function rpc(string $url, string $method, array $params = []): mixed
     {
         // This allowlist is deliberately independent from all signing/broadcast transports.
         if (! in_array($method, ['eth_chainId', 'eth_blockNumber', 'eth_getBlockByNumber',
-            'eth_getBalance', 'eth_estimateGas', 'eth_gasPrice'], true)) {
+            'eth_getBalance', 'eth_call', 'eth_estimateGas', 'eth_gasPrice'], true)) {
             throw new RuntimeException('pilot_rpc_method_forbidden');
         }
         $response = Http::timeout(15)->withOptions(['allow_redirects' => false])->post($url, [
@@ -112,6 +150,15 @@ final class MainnetPilotRpc
     {
         if (! is_string($value) || preg_match('/\A0x(?:0|[1-9a-fA-F][0-9a-fA-F]{0,63})\z/', $value) !== 1) {
             throw new RuntimeException('pilot_rpc_quantity_invalid');
+        }
+
+        return gmp_strval(gmp_init(substr($value, 2), 16), 10);
+    }
+
+    private function word(mixed $value): string
+    {
+        if (! is_string($value) || preg_match('/\A0x[0-9a-fA-F]{64}\z/', $value) !== 1) {
+            throw new RuntimeException('pilot_rpc_word_invalid');
         }
 
         return gmp_strval(gmp_init(substr($value, 2), 16), 10);

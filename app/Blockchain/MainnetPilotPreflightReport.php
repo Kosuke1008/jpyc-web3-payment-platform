@@ -37,6 +37,7 @@ final readonly class MainnetPilotPreflightReport
                 'pilot_payment',
                 'no_existing_attempt',
                 'fee_payer_balance',
+                'sender_jpyc_balance',
                 'fee_payer_policy',
                 'gas_observation',
             ]) ? 'READY' : 'NOT_READY',

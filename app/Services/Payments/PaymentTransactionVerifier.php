@@ -2,6 +2,7 @@
 
 namespace App\Services\Payments;
 
+use App\Models\PaymentFeeDelegationAttempt;
 use App\Payments\InvalidPaymentSnapshotException;
 use App\Payments\PaymentConfirmationEvidence;
 use App\Payments\PaymentSnapshot;
@@ -31,11 +32,27 @@ final class PaymentTransactionVerifier
             );
         }
 
+        $snapshot = $this->paymentSnapshot($payment);
+        $attempt = $this->feeDelegationAttempt(
+            $payment->id,
+            $snapshot->chainId,
+            $normalizedHash
+        );
+
         if ($payment->status === 'confirmed') {
             try {
                 $evidence = PaymentConfirmationEvidence::fromRecord($payment);
 
                 if ($evidence->transactionHash === $normalizedHash) {
+                    $this->assertFeeDelegationBinding(
+                        $attempt,
+                        (int) $payment->id,
+                        $normalizedHash,
+                        $userId,
+                        $evidence->payerAddress
+                    );
+                    $this->confirmFeeDelegationAttempt($attempt);
+
                     return;
                 }
             } catch (Throwable) {
@@ -49,7 +66,12 @@ final class PaymentTransactionVerifier
         }
 
         $this->assertPaymentEligible($payment, $normalizedHash);
-        $snapshot = $this->paymentSnapshot($payment);
+        $this->assertFeeDelegationBinding(
+            $attempt,
+            (int) $payment->id,
+            $normalizedHash,
+            $userId
+        );
         $createdAt = $this->createdAt($payment);
 
         // RPC work is intentionally completed before a DB transaction starts.
@@ -73,6 +95,12 @@ final class PaymentTransactionVerifier
                     ->lockForUpdate()
                     ->first();
                 $lockedSnapshot = $this->paymentSnapshot($payment);
+                $attempt = $this->feeDelegationAttempt(
+                    (int) $payment->id,
+                    $lockedSnapshot->chainId,
+                    $normalizedHash,
+                    true
+                );
 
                 $this->assertPaymentEligible(
                     $payment,
@@ -86,6 +114,14 @@ final class PaymentTransactionVerifier
                         PaymentVerificationException::PAYMENT_SNAPSHOT_UNAVAILABLE
                     );
                 }
+
+                $this->assertFeeDelegationBinding(
+                    $attempt,
+                    (int) $payment->id,
+                    $normalizedHash,
+                    $userId,
+                    $evidence->payerAddress
+                );
 
                 $updated = DB::table('payments')
                     ->where('id', $paymentId)
@@ -107,10 +143,107 @@ final class PaymentTransactionVerifier
                         PaymentVerificationException::PAYMENT_NOT_PENDING
                     );
                 }
+
+                $this->confirmFeeDelegationAttempt($attempt);
             });
         } catch (UniqueConstraintViolationException) {
             throw new PaymentVerificationException(
                 PaymentVerificationException::DUPLICATE_TRANSACTION_HASH
+            );
+        }
+    }
+
+    private function feeDelegationAttempt(
+        int $paymentId,
+        int $chainId,
+        string $transactionHash,
+        bool $lock = false
+    ): ?PaymentFeeDelegationAttempt {
+        $paymentQuery = PaymentFeeDelegationAttempt::query()
+            ->where('payment_id', $paymentId);
+        $hashQuery = PaymentFeeDelegationAttempt::query()
+            ->where('chain_id', $chainId)
+            ->where('tx_hash', $transactionHash);
+
+        if ($lock) {
+            $paymentQuery->lockForUpdate();
+            $hashQuery->lockForUpdate();
+        }
+
+        $paymentAttempt = $paymentQuery->first();
+        $hashAttempt = $hashQuery->first();
+
+        if ($paymentAttempt === null && $hashAttempt === null) {
+            return null;
+        }
+
+        if ($paymentAttempt === null
+            || $hashAttempt === null
+            || $paymentAttempt->id !== $hashAttempt->id) {
+            throw new PaymentVerificationException(
+                PaymentVerificationException::INVALID_TRANSACTION
+            );
+        }
+
+        return $paymentAttempt;
+    }
+
+    private function confirmFeeDelegationAttempt(?PaymentFeeDelegationAttempt $attempt): void
+    {
+        if ($attempt === null || $attempt->state === FeeDelegationAttemptState::CONFIRMED) {
+            return;
+        }
+
+        $observedAt = now();
+
+        if ($attempt->state === FeeDelegationAttemptState::SUBMITTED) {
+            $attempt->transitionTo(FeeDelegationAttemptState::RECEIPT_OBSERVED, [
+                'receipt_observed_at' => $observedAt,
+                'last_checked_at' => $observedAt,
+                'diagnostic_code' => null,
+            ]);
+        }
+
+        if ($attempt->state === FeeDelegationAttemptState::RECEIPT_OBSERVED) {
+            $attempt->transitionTo(FeeDelegationAttemptState::CONFIRMED, [
+                'resolved_at' => $observedAt,
+                'last_checked_at' => $observedAt,
+                'diagnostic_code' => null,
+            ]);
+        }
+    }
+
+    private function assertFeeDelegationBinding(
+        ?object $attempt,
+        int $paymentId,
+        string $transactionHash,
+        int $userId,
+        ?string $payerAddress = null
+    ): void {
+        if ($attempt === null) {
+            return;
+        }
+
+        $valid = (int) $attempt->payment_id === $paymentId
+            && (int) $attempt->requester_user_id === $userId
+            && is_string($attempt->tx_hash)
+            && hash_equals(strtolower($attempt->tx_hash), $transactionHash)
+            && $attempt->broadcast_certainty === BroadcastCertainty::SUBMITTED->value
+            && in_array($attempt->state, [
+                FeeDelegationAttemptState::SUBMITTED,
+                FeeDelegationAttemptState::RECEIPT_OBSERVED,
+                FeeDelegationAttemptState::CONFIRMED,
+            ], true);
+
+        if ($payerAddress !== null) {
+            $valid = $valid
+                && is_string($attempt->sender_address)
+                && hash_equals(strtolower($attempt->sender_address), $payerAddress);
+        }
+
+        if (! $valid) {
+            throw new PaymentVerificationException(
+                PaymentVerificationException::INVALID_TRANSACTION
             );
         }
     }

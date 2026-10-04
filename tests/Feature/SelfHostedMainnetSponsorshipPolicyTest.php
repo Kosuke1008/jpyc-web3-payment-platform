@@ -66,6 +66,9 @@ class SelfHostedMainnetSponsorshipPolicyTest extends TestCase
     public function test_valid_policy_runs_once_under_explicit_future_gates(): void
     {
         [$payment, $user] = $this->payment();
+        config([
+            'services.fee_delegation.mainnet_staging.pilot_payment_id' => 999,
+        ]);
         $calls = 0;
 
         $result = app(SelfHostedMainnetSponsorshipPolicy::class)->run(
@@ -83,6 +86,62 @@ class SelfHostedMainnetSponsorshipPolicyTest extends TestCase
 
         $this->assertSame('reserved', $result);
         $this->assertSame(1, $calls);
+    }
+
+    public function test_configured_limits_allow_a_second_independent_payment(): void
+    {
+        [$first, $user] = $this->payment();
+        $this->attempt($first, $user);
+        config([
+            'services.fee_delegation.self_hosted_mainnet.max_attempts_per_user' => 2,
+            'services.fee_delegation.self_hosted_mainnet.max_attempts_per_store' => 2,
+            'services.fee_delegation.self_hosted_mainnet.max_attempts_per_sender' => 2,
+            'services.fee_delegation.self_hosted_mainnet.max_attempts_global' => 2,
+            'services.fee_delegation.self_hosted_mainnet.daily_transaction_limit' => 2,
+        ]);
+        $second = $first->replicate();
+        $second->save();
+
+        $result = app(SelfHostedMainnetSponsorshipPolicy::class)->run(
+            $second,
+            PaymentSnapshot::fromRecord($second),
+            $this->transfer(),
+            'self-hosted',
+            $user->id,
+            fn (): string => 'second-reserved'
+        );
+
+        $this->assertSame('second-reserved', $result);
+    }
+
+    public function test_payment_without_durable_mainnet_authorization_is_rejected(): void
+    {
+        [$payment, $user] = $this->payment();
+        DB::table('payments')->where('id', $payment->id)->update([
+            'mainnet_authorized_at' => null,
+        ]);
+        $payment->refresh();
+        $called = false;
+
+        try {
+            app(SelfHostedMainnetSponsorshipPolicy::class)->run(
+                $payment,
+                PaymentSnapshot::fromRecord($payment),
+                $this->transfer(),
+                'self-hosted',
+                $user->id,
+                function () use (&$called): void {
+                    $called = true;
+                }
+            );
+            $this->fail('Expected policy rejection.');
+        } catch (PaymentSponsorshipException $exception) {
+            $this->assertSame(
+                PaymentSponsorshipException::POLICY_REJECTED,
+                $exception->reason
+            );
+            $this->assertFalse($called);
+        }
     }
 
     public function test_kill_switch_and_closed_mainnet_gate_fail_before_operation(): void
@@ -220,6 +279,7 @@ class SelfHostedMainnetSponsorshipPolicyTest extends TestCase
             'amount' => $amount,
             'status' => 'pending',
             'expires_at' => $expiresAt,
+            'mainnet_authorized_at' => now(),
         ], $snapshot->databaseAttributes()));
         config([
             'services.fee_delegation.mainnet_staging.pilot_payment_id' => $payment->id,

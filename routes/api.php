@@ -4,16 +4,19 @@ use App\Http\Controllers\Api\PaymentAuthenticationController;
 use App\Http\Controllers\Api\PaymentController;
 use App\Http\Controllers\Api\PaymentSponsorshipController;
 use App\Http\Controllers\Api\StaffAuthController;
+use App\Http\Controllers\Api\StaffPosController;
 use App\Http\Controllers\Api\UserAuthController;
 use App\Http\Controllers\Api\UserPaymentController;
 use Illuminate\Support\Facades\Route;
 
 // 公開認証API
-Route::post('/staff/login', [StaffAuthController::class, 'login']);
+Route::post('/staff/login', [StaffAuthController::class, 'login'])
+    ->middleware('throttle:staff-authentication');
 Route::post('/user/register', [UserAuthController::class, 'register']);
-Route::post('/user/login', [UserAuthController::class, 'login']);
+Route::post('/user/login', [UserAuthController::class, 'login'])
+    ->middleware('throttle:user-authentication');
 Route::post('/payment/login', [PaymentAuthenticationController::class, 'login'])
-    ->middleware('throttle:6,1');
+    ->middleware('throttle:user-authentication');
 
 // 決済情報表示
 Route::get('/payments/{id}', [PaymentController::class, 'show']);
@@ -61,6 +64,8 @@ Route::middleware([
         '/payments/create',
         [PaymentController::class, 'create']
     );
+    Route::get('/staff/pos/context', [StaffPosController::class, 'context']);
+    Route::get('/staff/payments', [StaffPosController::class, 'history']);
 });
 
 Route::get(

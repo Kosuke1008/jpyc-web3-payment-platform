@@ -29,6 +29,12 @@ final class ObserveMainnetPilotGas extends Command
                 throw new \RuntimeException('mainnet_profile_invalid');
             }
             $identities = $guard->identities();
+            $tokenBalance = $rpc->tokenBalance($identities['sender']);
+            if (bccomp($tokenBalance['sender_jpyc_atomic'], '1000000000000000000', 0) < 0) {
+                $this->error('NOT_READY: approved sender has less than 1 JPYC. Gas estimation was not attempted.');
+
+                return self::FAILURE;
+            }
             $observation = $rpc->gas($identities['sender'], $identities['merchant']);
         } catch (Throwable) {
             $this->error('NOT_READY: gas observation unavailable; verify identity, chain, RPC and sender JPYC balance. Do not guess gas limits.');

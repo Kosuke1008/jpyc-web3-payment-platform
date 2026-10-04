@@ -11,7 +11,10 @@ use App\Models\Payment;
 use App\Models\User;
 use App\Models\Wallet;
 use App\Payments\InvalidPaymentSnapshotException;
+use App\Payments\MainnetPaymentCreationPolicy;
 use App\Payments\MainnetPilotGuard;
+use App\Payments\MainnetPilotLimits;
+use App\Payments\PaymentDisplayStatus;
 use App\Payments\PaymentSnapshot;
 use App\Services\Payments\FeeDelegationEndpoint;
 use App\Services\Payments\PaymentTransactionVerifier;
@@ -100,10 +103,14 @@ class PaymentController extends Controller
 
     public function create(
         Request $request,
-        NetworkProfileRegistry $networks
+        NetworkProfileRegistry $networks,
+        MainnetPaymentCreationPolicy $mainnetCreation
     ) {
         try {
-            $profile = $networks->assertPaymentExecutionAllowed();
+            $profile = $networks->active();
+            if (! $profile->isKaiaMainnet()) {
+                $networks->assertPaymentExecutionAllowed($profile);
+            }
         } catch (NetworkExecutionDisabledException) {
             return response()->json([
                 'error' => 'Payment execution is disabled for this network',
@@ -152,13 +159,36 @@ class PaymentController extends Controller
             ]);
         }
 
+        try {
+            $mainnetCreation->assertAuthorized(
+                $profile,
+                $staff,
+                $wallet,
+                $snapshot
+            );
+        } catch (Throwable) {
+            return response()->json([
+                'error' => 'Mainnet payment authorization unavailable',
+            ], 503);
+        }
+
         // [Flow B] 期限付きのpending支払いを既存DBへ作成する。
-        $payment = Payment::create(array_merge([
+        $attributes = array_merge([
             'store_id' => $storeId,
             'staff_id' => $staffId,
             'amount' => (int) $snapshot->displayAmount,
             'status' => 'pending',
-        ], $snapshot->databaseAttributes()));
+        ], $snapshot->databaseAttributes());
+        if ($snapshot->network === 'kaia-mainnet') {
+            $attributes['mainnet_authorized_at'] = now();
+        }
+        try {
+            $payment = Payment::create($attributes);
+        } catch (Throwable) {
+            return response()->json([
+                'error' => 'Payment creation failed safely',
+            ], 503);
+        }
 
         $payUrl = config('app.url').'/pay/'.$payment->id;
 
@@ -176,6 +206,12 @@ class PaymentController extends Controller
             'amount' => $payment->amount,
             'pay_url' => $payUrl,
             'qr_code' => $qr,
+            'qr_code_base64' => base64_encode($qr),
+            'expires_at' => $snapshot->expiresAt->toIso8601String(),
+            'network' => $snapshot->network,
+            'chain_name' => $profile->chainName,
+            'recipient_address' => $snapshot->recipientAddress,
+            'token_symbol' => $snapshot->tokenSymbol,
         ]);
     }
 
@@ -210,7 +246,7 @@ class PaymentController extends Controller
                 $guard = app(MainnetPilotGuard::class);
                 $guard->assertDatabase();
                 $identities = $guard->identities();
-                if (MainnetPilotGuard::positiveId(config('services.fee_delegation.mainnet_staging.pilot_payment_id')) === $payment->id
+                if ($payment->mainnet_authorized_at !== null
                     && $payment->store_id === $identities['store']->id
                     && $payment->staff_id === $identities['staff']->id
                     && $snapshot->recipientAddress === $identities['merchant']) {
@@ -218,6 +254,7 @@ class PaymentController extends Controller
                         'payment_id' => $payment->id, 'store_id' => $payment->store_id,
                         'user_id' => $identities['user']->id, 'merchant_address' => $identities['merchant'],
                         'sender_address' => $identities['sender'],
+                        'max_payment_jpyc' => MainnetPilotLimits::paymentMaximum(),
                     ];
                 }
             } catch (Throwable) {
@@ -260,7 +297,9 @@ class PaymentController extends Controller
                 && $active->id === $snapshot->network
                 && $this->feeDelegationAvailable($profile);
             if ($snapshot->network === 'kaia-mainnet' && $available) {
-                $available = $gateState->check()['live'];
+                $available = $gateState->check(
+                    requestedPaymentId: $payment->id
+                )['live'];
             }
         } catch (Throwable) {
             return response()->json(['available' => false]);
@@ -295,7 +334,8 @@ class PaymentController extends Controller
         }
 
         return response()->json([
-            'status' => $payment->status,
+            'status' => PaymentDisplayStatus::for($payment),
+            'expires_at' => $payment->expires_at?->toIso8601String(),
         ]);
     }
 

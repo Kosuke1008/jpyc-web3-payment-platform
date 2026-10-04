@@ -21,6 +21,7 @@ class PaymentFeeDelegationAttempt extends Model
         'state',
         'provider_http_status',
         'diagnostic_code',
+        'broadcast_certainty',
         'sender_nonce',
         'validated_at',
         'submitting_at',
@@ -79,6 +80,7 @@ class PaymentFeeDelegationAttempt extends Model
             'sender_tx_hash' => $this->sender_tx_hash,
             'tx_hash' => $this->tx_hash,
             'diagnostic_code' => $this->diagnostic_code,
+            'broadcast_certainty' => $this->broadcast_certainty,
             'state_from' => $from,
             'state_to' => $to,
         ]);

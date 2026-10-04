@@ -99,31 +99,45 @@ async function loadPayments() {
         const data = await res.json();
 
         if (!res.ok) {
-            status.innerText = data.message ?? "決済履歴の取得に失敗しました";
+            status.textContent = data.message ?? "決済履歴の取得に失敗しました";
             return;
         }
 
-        status.innerText = "";
+        status.textContent = "";
 
-        if (!data.payments || data.payments.length === 0) {
-            paymentsDiv.innerHTML = "<p>決済履歴はありません。</p>";
+        if (!Array.isArray(data.payments) || data.payments.length === 0) {
+            const emptyMessage = document.createElement("p");
+            emptyMessage.textContent = "決済履歴はありません。";
+            paymentsDiv.replaceChildren(emptyMessage);
             return;
         }
 
-        paymentsDiv.innerHTML = data.payments.map(payment => `
-            <div class="payment-card">
-                <div class="amount">${payment.amount} JPYC</div>
-                <div class="store">${payment.store_name}</div>
-                <div class="status">${payment.status}</div>
-                <div class="date">${payment.paid_at ?? ""}</div>
-                <div class="tx">tx: ${payment.tx_hash ?? ""}</div>
-            </div>
-        `).join("");
+        const cards = data.payments.map(payment => {
+            const card = document.createElement("div");
+            card.className = "payment-card";
+
+            appendTextElement(card, "amount", `${payment.amount ?? ""} JPYC`);
+            appendTextElement(card, "store", payment.store_name ?? "");
+            appendTextElement(card, "status", payment.status ?? "");
+            appendTextElement(card, "date", payment.paid_at ?? "");
+            appendTextElement(card, "tx", `tx: ${payment.tx_hash ?? ""}`);
+
+            return card;
+        });
+
+        paymentsDiv.replaceChildren(...cards);
 
     } catch (error) {
         console.error(error);
-        status.innerText = "通信エラーが発生しました";
+        status.textContent = "通信エラーが発生しました";
     }
+}
+
+function appendTextElement(parent, className, value) {
+    const element = document.createElement("div");
+    element.className = className;
+    element.textContent = String(value);
+    parent.appendChild(element);
 }
 
 loadPayments();

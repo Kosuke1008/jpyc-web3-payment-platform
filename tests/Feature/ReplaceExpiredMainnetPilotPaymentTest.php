@@ -37,9 +37,6 @@ final class ReplaceExpiredMainnetPilotPaymentTest extends TestCase
     {
         parent::setUp();
         Carbon::setTestNow('2026-09-10T00:00:00Z');
-        if (DB::getDriverName() === 'sqlite') {
-            DB::statement('PRAGMA ignore_check_constraints = ON');
-        }
         $this->app['env'] = 'mainnet-staging';
         config([
             'blockchain.network' => 'kaia-mainnet',
@@ -50,6 +47,7 @@ final class ReplaceExpiredMainnetPilotPaymentTest extends TestCase
             'services.fee_delegation.mode' => 'self-hosted',
             'services.fee_delegation.self_hosted_mainnet.enabled' => false,
             'services.fee_delegation.self_hosted_mainnet.kill_switch' => true,
+            'services.fee_delegation.self_hosted_mainnet.max_payment_jpy' => 1,
         ]);
 
         $store = Store::query()->create([
@@ -100,6 +98,7 @@ final class ReplaceExpiredMainnetPilotPaymentTest extends TestCase
             'staff_id' => $staff->id,
             'amount' => 1,
             'status' => 'pending',
+            'mainnet_authorized_at' => now(),
         ], $snapshot->databaseAttributes()));
         config([
             'services.fee_delegation.mainnet_staging.pilot_payment_id' => $this->payment->id,
@@ -146,6 +145,7 @@ final class ReplaceExpiredMainnetPilotPaymentTest extends TestCase
         $this->assertSame('pending', $new->status);
         $this->assertNull($new->user_id);
         $this->assertNull($new->tx_hash);
+        $this->assertNotNull($new->mainnet_authorized_at);
         $this->assertSame('kaia-mainnet', $snapshot->network);
         $this->assertSame(8217, $snapshot->chainId);
         $this->assertSame(MainnetReadinessChecker::JPYC_CONTRACT, $snapshot->tokenContract);
@@ -156,6 +156,46 @@ final class ReplaceExpiredMainnetPilotPaymentTest extends TestCase
         $this->assertSame('1000000000000000000', $snapshot->atomicAmount);
         $this->assertTrue($snapshot->expiresAt->equalTo(now()->addSeconds(21600)));
         $this->assertDatabaseCount('payment_fee_delegation_attempts', 0);
+        Http::assertNothingSent();
+    }
+
+    public function test_replacement_preserves_a_variable_amount_within_the_configured_limit(): void
+    {
+        config([
+            'services.fee_delegation.self_hosted_mainnet.max_payment_jpy' => 125,
+        ]);
+        DB::table('payments')->where('id', $this->payment->id)->update([
+            'amount' => 125,
+            'display_amount' => '125',
+            'atomic_amount' => '125000000000000000000',
+            'expires_at' => now()->subSecond(),
+        ]);
+        $this->payment->refresh();
+
+        $this->artisan('mainnet:replace-expired-pilot-payment')
+            ->assertSuccessful();
+
+        $new = Payment::query()->whereKeyNot($this->payment->id)->sole();
+        $snapshot = PaymentSnapshot::fromRecord($new);
+        $this->assertSame(125, $new->amount);
+        $this->assertSame('125', $snapshot->displayAmount);
+        $this->assertSame('125000000000000000000', $snapshot->atomicAmount);
+        $this->assertDatabaseCount('payments', 2);
+        Http::assertNothingSent();
+    }
+
+    public function test_replacement_rejects_a_pilot_limit_above_the_generic_payment_limit(): void
+    {
+        $this->expirePayment();
+        config([
+            'services.fee_delegation.self_hosted_mainnet.max_payment_jpy' => 100001,
+            'blockchain.payment_max_jpy' => 100000,
+        ]);
+
+        $this->artisan('mainnet:replace-expired-pilot-payment')
+            ->assertFailed();
+
+        $this->assertDatabaseCount('payments', 1);
         Http::assertNothingSent();
     }
 
@@ -209,6 +249,26 @@ final class ReplaceExpiredMainnetPilotPaymentTest extends TestCase
 
         $this->assertSame('pending', $new->status);
         $this->assertNull($new->tx_hash);
+        Http::assertNothingSent();
+    }
+
+    public function test_rejected_attempt_without_definitive_no_broadcast_evidence_cannot_be_replaced(): void
+    {
+        foreach ([null, 'broadcast_possible', 'submitted'] as $certainty) {
+            $this->expirePayment();
+            $this->createDefinitiveRejectedAttempt();
+            PaymentFeeDelegationAttempt::query()->update([
+                'broadcast_certainty' => $certainty,
+            ]);
+
+            $this->artisan('mainnet:replace-expired-pilot-payment')
+                ->expectsOutputToContain('fee_delegation_attempt_exists')
+                ->assertFailed();
+
+            $this->assertDatabaseCount('payments', 1);
+            PaymentFeeDelegationAttempt::query()->delete();
+        }
+
         Http::assertNothingSent();
     }
 
@@ -486,6 +546,7 @@ final class ReplaceExpiredMainnetPilotPaymentTest extends TestCase
             'state' => 'rejected',
             'provider_http_status' => 400,
             'diagnostic_code' => 'provider_rejected',
+            'broadcast_certainty' => 'definitely_not_broadcast',
             'sender_nonce' => '0',
             'validated_at' => now(),
             'submitting_at' => now(),

@@ -11,6 +11,7 @@ interface FeeDelegationGateway
     public function sponsor(
         string $senderSignedTransaction,
         ?int $paymentId = null,
-        ?string $expiresAt = null
+        ?string $expiresAt = null,
+        ?string $paymentAuthorization = null
     ): FeeDelegationSubmission;
 }

@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Blockchain\NetworkProfileRegistry;
 use App\Models\Payment;
+use App\Models\PaymentFeeDelegationAttempt;
 use App\Models\Staff;
 use App\Models\Store;
 use App\Models\User;
@@ -58,11 +59,6 @@ class PaymentConfirmTest extends TestCase
 
         Http::preventStrayRequests();
 
-        // The production status-alignment migration targets MySQL only. Tests
-        // use SQLite, whose original enum check still lists legacy statuses.
-        if (DB::getDriverName() === 'sqlite') {
-            DB::statement('PRAGMA ignore_check_constraints = ON');
-        }
     }
 
     protected function tearDown(): void
@@ -142,6 +138,85 @@ class PaymentConfirmTest extends TestCase
         $this->assertSame($user->id, $payment->user_id);
         $this->assertSame(self::SENDER_ADDRESS, $payment->payer_address);
         $this->assertNotSame($user->wallet_address, $payment->payer_address);
+    }
+
+    public function test_fee_delegated_confirmation_requires_matching_attempt(): void
+    {
+        $payment = $this->createPayment();
+        $user = $this->authenticateUser();
+        $this->createSubmittedAttempt($payment, $user);
+        $this->fakeRpc($this->successfulReceipt($payment->amount));
+
+        $this->postJson(
+            "/api/payments/{$payment->id}/confirm",
+            ['tx_hash' => self::TX_HASH]
+        )->assertOk();
+
+        $this->assertSame('confirmed', $payment->fresh()->status);
+        $attempt = PaymentFeeDelegationAttempt::query()
+            ->where('payment_id', $payment->id)
+            ->sole();
+        $this->assertSame('confirmed', $attempt->state);
+        $this->assertNotNull($attempt->receipt_observed_at);
+        $this->assertNotNull($attempt->resolved_at);
+        $this->assertNotNull($attempt->last_checked_at);
+    }
+
+    public function test_fee_delegated_confirmation_rejects_wrong_requester_before_rpc(): void
+    {
+        $payment = $this->createPayment();
+        $requester = User::create([
+            'name' => 'Original Requester',
+            'email' => 'original-requester@example.test',
+            'password' => 'not-used',
+        ]);
+        $this->createSubmittedAttempt($payment, $requester);
+        $this->authenticateUser();
+
+        $this->postJson(
+            "/api/payments/{$payment->id}/confirm",
+            ['tx_hash' => self::TX_HASH]
+        )->assertBadRequest()->assertExactJson(['error' => 'Invalid transaction']);
+
+        $this->assertPaymentIsStillPending($payment);
+        Http::assertNothingSent();
+    }
+
+    public function test_transaction_claimed_by_another_payment_attempt_is_rejected(): void
+    {
+        $claimedPayment = $this->createPayment();
+        $targetPayment = $this->createSiblingPayment($claimedPayment);
+        $user = $this->authenticateUser();
+        $this->createSubmittedAttempt($claimedPayment, $user);
+
+        $this->postJson(
+            "/api/payments/{$targetPayment->id}/confirm",
+            ['tx_hash' => self::TX_HASH]
+        )->assertBadRequest()->assertExactJson(['error' => 'Invalid transaction']);
+
+        $this->assertPaymentIsStillPending($claimedPayment);
+        $this->assertPaymentIsStillPending($targetPayment);
+        Http::assertNothingSent();
+    }
+
+    public function test_fee_delegated_confirmation_rejects_sender_mismatch(): void
+    {
+        $payment = $this->createPayment();
+        $user = $this->authenticateUser();
+        $this->createSubmittedAttempt(
+            $payment,
+            $user,
+            sender: self::OTHER_RECIPIENT
+        );
+        $this->fakeRpc($this->successfulReceipt($payment->amount));
+
+        $this->postJson(
+            "/api/payments/{$payment->id}/confirm",
+            ['tx_hash' => self::TX_HASH]
+        )->assertBadRequest()->assertExactJson(['error' => 'Invalid transaction']);
+
+        $this->assertPaymentIsStillPending($payment);
+        Http::assertSentCount(4);
     }
 
     public function test_unauthenticated_confirmation_fails(): void
@@ -1410,6 +1485,42 @@ class PaymentConfirmTest extends TestCase
         Sanctum::actingAs($user, ['*']);
 
         return $user;
+    }
+
+    private function createSubmittedAttempt(
+        Payment $payment,
+        User $requester,
+        string $sender = self::SENDER_ADDRESS
+    ): PaymentFeeDelegationAttempt {
+        return PaymentFeeDelegationAttempt::query()->create([
+            'payment_id' => $payment->id,
+            'requester_user_id' => $requester->id,
+            'network' => $payment->network,
+            'chain_id' => $payment->chain_id,
+            'provider' => 'self-hosted',
+            'sender_address' => strtolower($sender),
+            'sender_tx_hash' => '0x'.str_pad(dechex($payment->id), 64, '0', STR_PAD_LEFT),
+            'tx_hash' => self::TX_HASH,
+            'request_fingerprint' => hash('sha256', 'payment-'.$payment->id),
+            'state' => 'submitted',
+            'broadcast_certainty' => 'submitted',
+            'sender_nonce' => (string) $payment->id,
+            'validated_at' => now(),
+            'submitting_at' => now(),
+            'submitted_at' => now(),
+        ]);
+    }
+
+    private function createSiblingPayment(Payment $payment): Payment
+    {
+        $snapshot = PaymentSnapshot::fromRecord($payment);
+
+        return Payment::query()->create(array_merge([
+            'store_id' => $payment->store_id,
+            'staff_id' => $payment->staff_id,
+            'amount' => $payment->amount,
+            'status' => 'pending',
+        ], $snapshot->databaseAttributes()));
     }
 
     /** @return array<string, null> */

@@ -14,12 +14,14 @@ use App\Models\User;
 use App\Models\Wallet;
 use App\Payments\MainnetPilotLimits;
 use App\Payments\PaymentSnapshot;
+use App\Services\Payments\MainnetPaymentAuthorization;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Factory;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Http;
+use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
 
 class MainnetPilotPreflightTest extends TestCase
@@ -56,6 +58,9 @@ class MainnetPilotPreflightTest extends TestCase
             'blockchain.mainnet_broadcast_enabled' => false,
             'blockchain.mainnet_readiness_max_block_lag' => 10,
             'services.fee_delegation.mode' => 'self-hosted',
+            'services.fee_delegation.enabled' => false,
+            'services.fee_delegation.url' => 'http://127.0.0.1:19000',
+            'services.fee_delegation.api_key' => 'test-only-key',
             'services.fee_delegation.max_gas' => 150000,
             'services.fee_delegation.self_hosted_mainnet' => [
                 'enabled' => false,
@@ -71,6 +76,7 @@ class MainnetPilotPreflightTest extends TestCase
                 'daily_transaction_limit' => 1,
                 'daily_kaia_budget' => '0.00375',
                 'minimum_reserve_kaia' => '0.01',
+                'authorization_key' => str_repeat('c', 64),
             ],
             'services.fee_delegation.mainnet_staging' => [
                 'environment_id' => 'mainnet-staging',
@@ -114,6 +120,9 @@ class MainnetPilotPreflightTest extends TestCase
         $this->assertSame('ACTIVE', $report->toArray()['kill_switch']);
         $this->assertSame('3750000000000000', $report->publicContext['maximum_gas_spend_wei']);
         $this->assertSame('0.01375', $report->publicContext['recommended_funding_kaia']);
+        $this->assertTrue($report->checks['sender_jpyc_balance']['ready']);
+        $this->assertSame('2000000000000000000', $report->publicContext['sender_jpyc_atomic']);
+        $this->assertSame('1000000000000000000', $report->publicContext['observed_transfer_atomic_amount']);
 
         $this->artisan('blockchain:mainnet-pilot-preflight')
             ->expectsOutputToContain('PILOT_PREFLIGHT_READY')
@@ -133,6 +142,69 @@ class MainnetPilotPreflightTest extends TestCase
             'payment_id' => $this->payment->id,
         ]);
         $this->assertSame('pending', $this->payment->fresh()->status);
+    }
+
+    public function test_store_can_create_mainnet_qr_payment_while_all_execution_gates_are_closed(): void
+    {
+        $staff = Staff::query()->sole();
+        Sanctum::actingAs($staff, ['payment:create']);
+        // The generic Kaia switch may remain on; the three Mainnet-specific
+        // execution switches and self-hosted gate still prevent execution.
+        config(['services.fee_delegation.enabled' => true]);
+
+        $this->getJson('/api/staff/pos/context')
+            ->assertOk()
+            ->assertJsonPath('ready', true)
+            ->assertJsonPath('creation_available', true)
+            ->assertJsonPath('network.id', 'kaia-mainnet')
+            ->assertJsonPath('diagnostic', 'none');
+
+        $response = $this->postJson('/api/payments/create', ['amount' => 1])
+            ->assertOk()
+            ->assertJsonPath('amount', 1)
+            ->assertJsonPath('network', 'kaia-mainnet')
+            ->assertJsonPath('recipient_address', self::MERCHANT);
+
+        $payment = Payment::query()->findOrFail($response->json('payment_id'));
+        $this->assertSame('pending', $payment->status);
+        $this->assertNotNull($payment->mainnet_authorized_at);
+        $this->assertDatabaseCount('payment_fee_delegation_attempts', 0);
+        Http::assertNothingSent();
+    }
+
+    public function test_store_payment_creation_rejects_a_partially_open_mainnet_gate_set(): void
+    {
+        $staff = Staff::query()->sole();
+        Sanctum::actingAs($staff, ['payment:create']);
+        config(['blockchain.payments_mainnet_enabled' => true]);
+
+        $this->getJson('/api/staff/pos/context')
+            ->assertOk()
+            ->assertJsonPath('creation_available', false)
+            ->assertJsonPath('diagnostic', 'payment_execution_disabled');
+        $this->postJson('/api/payments/create', ['amount' => 1])
+            ->assertServiceUnavailable()
+            ->assertJsonPath('error', 'Mainnet payment authorization unavailable');
+
+        $this->assertDatabaseCount('payments', 1);
+        Http::assertNothingSent();
+    }
+
+    public function test_preflight_stops_before_gas_estimation_when_sender_jpyc_is_insufficient(): void
+    {
+        $this->fakeReadOnlyServices(senderJpycAtomic: '0');
+
+        $report = app(MainnetPilotPreflightChecker::class)->check($this->payment->id);
+
+        $this->assertFalse($report->ready);
+        $this->assertFalse($report->checks['sender_jpyc_balance']['ready']);
+        $this->assertSame(
+            'sender_jpyc_balance_unreadable_or_insufficient',
+            $report->checks['sender_jpyc_balance']['diagnostic']
+        );
+        $this->assertFalse($report->checks['gas_observation']['ready']);
+        $this->assertSame('0', $report->publicContext['sender_jpyc_atomic']);
+        Http::assertNotSent(fn (Request $request): bool => ($request['method'] ?? null) === 'eth_estimateGas');
     }
 
     public function test_wrong_payment_id_amount_sender_and_merchant_fail_closed(): void
@@ -229,11 +301,38 @@ class MainnetPilotPreflightTest extends TestCase
         $this->assertSame(1, $snapshot->networkProfileVersion);
         $this->assertNull($payment->user_id); // This is confirmation evidence, not a preassigned payer field.
         $this->assertNull($payment->tx_hash);
+        $this->assertNotNull($payment->mainnet_authorized_at);
         $this->assertSame($before, $this->identityRows());
         $this->assertDatabaseCount('payment_fee_delegation_attempts', 0);
         Http::assertNothingSent();
         $this->artisan('mainnet:create-pilot-payment')->assertFailed();
         $this->assertDatabaseCount('payments', 1);
+    }
+
+    public function test_creation_accepts_configured_variable_amount_and_rejects_amount_above_limit(): void
+    {
+        Payment::query()->delete();
+        config([
+            'services.fee_delegation.mainnet_staging.pilot_payment_id' => null,
+            'services.fee_delegation.self_hosted_mainnet.max_payment_jpy' => 125,
+        ]);
+
+        $this->artisan('mainnet:create-pilot-payment', ['--amount' => '125'])
+            ->expectsOutputToContain('display_amount=125')
+            ->expectsOutputToContain('atomic_amount=125000000000000000000')
+            ->assertSuccessful();
+
+        $payment = Payment::query()->sole();
+        $snapshot = PaymentSnapshot::fromRecord($payment);
+        $this->assertSame(125, $payment->amount);
+        $this->assertSame('125', $snapshot->displayAmount);
+        $this->assertSame('125000000000000000000', $snapshot->atomicAmount);
+
+        Payment::query()->delete();
+        $this->artisan('mainnet:create-pilot-payment', ['--amount' => '126'])
+            ->assertFailed();
+        $this->assertDatabaseCount('payments', 0);
+        Http::assertNothingSent();
     }
 
     public function test_creation_rejects_existing_payment_even_without_configured_id(): void
@@ -323,6 +422,43 @@ class MainnetPilotPreflightTest extends TestCase
         $this->assertSame($before, $this->databaseRows());
     }
 
+    public function test_ten_payment_budget_requires_daily_budget_plus_reserve(): void
+    {
+        config([
+            'services.fee_delegation.self_hosted_mainnet.max_attempts_per_user' => 10,
+            'services.fee_delegation.self_hosted_mainnet.max_attempts_per_store' => 10,
+            'services.fee_delegation.self_hosted_mainnet.max_attempts_per_sender' => 10,
+            'services.fee_delegation.self_hosted_mainnet.max_attempts_global' => 10,
+            'services.fee_delegation.self_hosted_mainnet.daily_transaction_limit' => 10,
+            'services.fee_delegation.self_hosted_mainnet.daily_kaia_budget' => '0.0375',
+            'services.fee_delegation.mainnet_staging.pilot_max_fee_payer_balance_kaia' => '0.0475',
+        ]);
+        $policy = [
+            'max_attempts_per_user' => '10',
+            'max_attempts_per_store' => '10',
+            'max_attempts_per_sender' => '10',
+            'max_attempts_global' => '10',
+            'daily_transaction_limit' => '10',
+            'daily_kaia_budget_wei' => '37500000000000000',
+            'maximum_balance_wei' => '47500000000000000',
+        ];
+        $this->fakeReadOnlyServices('0.0475', healthOverrides: ['pilot_policy' => $policy]);
+
+        $report = app(MainnetPilotPreflightChecker::class)->check($this->payment->id);
+
+        $this->assertTrue($report->ready);
+        $this->assertSame('47500000000000000', $report->publicContext['recommended_funding_wei']);
+        $this->assertSame('0.0475', $report->publicContext['recommended_funding_kaia']);
+
+        $this->fakeReadOnlyServices('0.047499999999999999', healthOverrides: ['pilot_policy' => $policy]);
+        $report = app(MainnetPilotPreflightChecker::class)->check($this->payment->id);
+        $this->assertFalse($report->checks['fee_payer_balance']['ready']);
+
+        config(['services.fee_delegation.mainnet_staging.pilot_max_fee_payer_balance_kaia' => '0.047499999999999999']);
+        $this->expectException(\RuntimeException::class);
+        app(MainnetPilotLimits::class)->validate();
+    }
+
     public function test_funding_plan_rejects_bad_config_excess_balance_and_rpc_failure(): void
     {
         config(['services.fee_delegation.mainnet_staging.pilot_max_fee_payer_balance_kaia' => '0.001']);
@@ -387,10 +523,46 @@ class MainnetPilotPreflightTest extends TestCase
         $this->assertDatabaseCount('payment_fee_delegation_attempts', 0);
     }
 
+    public function test_preflight_accepts_strongly_bound_legacy_confirmed_payment_as_closed_history(): void
+    {
+        [$confirmed, $current] = $this->createConfirmedHistoryAndCurrent();
+
+        $report = app(MainnetPilotPreflightChecker::class)->check();
+
+        $this->assertTrue($report->ready);
+        $this->assertTrue($report->checks['pilot_payment']['ready']);
+        $this->assertSame('confirmed', $confirmed->fresh()->status);
+        $this->assertSame('pending', $current->fresh()->status);
+        $this->assertDatabaseCount('payment_fee_delegation_attempts', 1);
+    }
+
+    public function test_preflight_rejects_legacy_confirmed_history_when_attempt_binding_is_incomplete(): void
+    {
+        [$confirmed] = $this->createConfirmedHistoryAndCurrent();
+        PaymentFeeDelegationAttempt::query()
+            ->where('payment_id', $confirmed->id)
+            ->update(['sender_address' => self::FEE_PAYER]);
+
+        $report = app(MainnetPilotPreflightChecker::class)->check();
+
+        $this->assertFalse($report->checks['pilot_payment']['ready']);
+        $this->assertTrue($report->checks['no_existing_attempt']['ready']);
+    }
+
+    public function test_preflight_rejects_confirmed_history_with_reconciliation_anomaly(): void
+    {
+        [$confirmed] = $this->createConfirmedHistoryAndCurrent();
+        $confirmed->forceFill(['reconciliation_status' => 'anomaly'])->saveQuietly();
+
+        $report = app(MainnetPilotPreflightChecker::class)->check();
+
+        $this->assertFalse($report->checks['pilot_payment']['ready']);
+    }
+
     public function test_preflight_rejects_invalid_history_attempt_and_non_latest_configured_id(): void
     {
         [$old, $current] = $this->createPreservedHistoryAndCurrent(2);
-        $old->forceFill(['expires_at' => now()->addSecond()])->saveQuietly();
+        $old->forceFill(['expires_at' => now()->addMinute()])->saveQuietly();
         $this->assertFalse(app(MainnetPilotPreflightChecker::class)->check()->checks['pilot_payment']['ready']);
 
         $old->forceFill(['expires_at' => now()->subSecond()])->saveQuietly();
@@ -419,20 +591,47 @@ class MainnetPilotPreflightTest extends TestCase
         $this->assertFalse(app(MainnetPilotPreflightChecker::class)->check()->checks['pilot_payment']['ready']);
     }
 
-    public function test_preflight_reports_actual_gate_failure_and_checks_all_single_attempt_limits(): void
+    public function test_preflight_reports_actual_gate_failure_and_checks_bounded_attempt_limits(): void
     {
         config(['blockchain.mainnet_broadcast_enabled' => true, 'services.fee_delegation.self_hosted_mainnet.kill_switch' => false]);
         $report = app(MainnetPilotPreflightChecker::class)->check();
         $this->assertSame('NOT_DISABLED', $report->toArray()['broadcast']);
         $this->assertSame('NOT_ACTIVE', $report->toArray()['kill_switch']);
         config(['blockchain.mainnet_broadcast_enabled' => false, 'services.fee_delegation.self_hosted_mainnet.kill_switch' => true]);
-        foreach (['max_payment_jpy', 'max_attempts_per_user', 'max_attempts_per_store', 'max_attempts_per_sender',
-            'max_attempts_global', 'daily_transaction_limit'] as $key) {
-            config(['services.fee_delegation.self_hosted_mainnet.'.$key => 2]);
-            $this->assertFalse(app(MainnetPilotPreflightChecker::class)->check()->checks['pilot_limits']['ready']);
-            config(['services.fee_delegation.self_hosted_mainnet.'.$key => 1]);
-        }
+        config([
+            'services.fee_delegation.self_hosted_mainnet.max_attempts_per_user' => 2,
+            'services.fee_delegation.self_hosted_mainnet.max_attempts_per_store' => 2,
+            'services.fee_delegation.self_hosted_mainnet.max_attempts_per_sender' => 2,
+            'services.fee_delegation.self_hosted_mainnet.max_attempts_global' => 2,
+            'services.fee_delegation.self_hosted_mainnet.daily_transaction_limit' => 2,
+        ]);
+        $this->assertTrue(app(MainnetPilotPreflightChecker::class)->check()->checks['pilot_limits']['ready']);
+        config(['services.fee_delegation.self_hosted_mainnet.max_attempts_global' => 1001]);
+        $this->assertFalse(app(MainnetPilotPreflightChecker::class)->check()->checks['pilot_limits']['ready']);
+        config([
+            'services.fee_delegation.self_hosted_mainnet.max_attempts_global' => 1,
+            'services.fee_delegation.self_hosted_mainnet.max_attempts_per_user' => 2,
+        ]);
+        $this->assertFalse(app(MainnetPilotPreflightChecker::class)->check()->checks['pilot_limits']['ready']);
+        config([
+            'services.fee_delegation.self_hosted_mainnet.max_attempts_per_user' => 1,
+            'services.fee_delegation.self_hosted_mainnet.max_attempts_per_store' => 1,
+            'services.fee_delegation.self_hosted_mainnet.max_attempts_per_sender' => 1,
+            'services.fee_delegation.self_hosted_mainnet.max_attempts_global' => 1,
+            'services.fee_delegation.self_hosted_mainnet.daily_transaction_limit' => 1,
+        ]);
+        config([
+            'services.fee_delegation.self_hosted_mainnet.max_payment_jpy' => 100001,
+            'blockchain.payment_max_jpy' => 100000,
+        ]);
+        $this->assertFalse(app(MainnetPilotPreflightChecker::class)->check()->checks['pilot_limits']['ready']);
+        config(['services.fee_delegation.self_hosted_mainnet.max_payment_jpy' => 1]);
         config(['services.fee_delegation.self_hosted_mainnet.rate_window_seconds' => 1]);
+        $this->assertFalse(app(MainnetPilotPreflightChecker::class)->check()->checks['pilot_limits']['ready']);
+        config([
+            'services.fee_delegation.self_hosted_mainnet.rate_window_seconds' => 3600,
+            'services.fee_delegation.self_hosted_mainnet.authorization_key' => null,
+        ]);
         $this->assertFalse(app(MainnetPilotPreflightChecker::class)->check()->checks['pilot_limits']['ready']);
     }
 
@@ -466,15 +665,101 @@ class MainnetPilotPreflightTest extends TestCase
         $this->assertSame($before, $this->databaseRows());
     }
 
+    public function test_staff_pin_rotation_changes_only_staff_pin_and_revokes_staff_tokens(): void
+    {
+        $staff = Staff::query()->sole();
+        $staff->createToken('old-pos-token', ['payment:create']);
+        $before = $this->databaseRows();
+        $secretFile = sys_get_temp_dir().'/livt-staff-pin-test-'.bin2hex(random_bytes(8));
+        $question = "Rotate only the Staff PIN for pilot Store {$staff->store_id} / Staff {$staff->id}?";
+
+        try {
+            $this->artisan('mainnet:rotate-pilot-staff-pin', [
+                '--secret-file' => $secretFile,
+            ])->expectsConfirmation($question, 'yes')->assertSuccessful();
+
+            $after = $this->databaseRows();
+            $this->assertNotSame(
+                $before['staffs'][0]['pin'],
+                $after['staffs'][0]['pin']
+            );
+            $newPin = trim((string) file_get_contents($secretFile));
+            $this->assertMatchesRegularExpression('/\A[0-9a-f]{32}\z/', $newPin);
+            $this->assertTrue(Hash::check($newPin, $after['staffs'][0]['pin']));
+            $this->assertSame(0600, fileperms($secretFile) & 0777);
+
+            foreach (['stores' => 'store_pin', 'users' => 'password'] as $table => $column) {
+                $this->assertSame($before[$table][0][$column], $after[$table][0][$column]);
+            }
+            $this->assertSame(
+                $before['wallets'][0]['address'],
+                $after['wallets'][0]['address']
+            );
+            $this->assertDatabaseCount('personal_access_tokens', 0);
+            Http::assertNothingSent();
+        } finally {
+            if (file_exists($secretFile)) {
+                unlink($secretFile);
+            }
+        }
+    }
+
+    public function test_staff_pin_rotation_refuses_without_confirmation_or_safe_secret_file(): void
+    {
+        $staff = Staff::query()->sole();
+        $before = $staff->pin;
+        $secretFile = sys_get_temp_dir().'/livt-staff-pin-test-'.bin2hex(random_bytes(8));
+        $question = "Rotate only the Staff PIN for pilot Store {$staff->store_id} / Staff {$staff->id}?";
+
+        $this->artisan('mainnet:rotate-pilot-staff-pin', [
+            '--secret-file' => $secretFile,
+        ])->expectsConfirmation($question, 'no')->assertFailed();
+        $this->assertFileDoesNotExist($secretFile);
+        $this->assertSame($before, $staff->fresh()->pin);
+
+        file_put_contents($secretFile, 'do-not-overwrite');
+        try {
+            $this->artisan('mainnet:rotate-pilot-staff-pin', [
+                '--secret-file' => $secretFile,
+            ])->assertFailed();
+            $this->assertSame('do-not-overwrite', file_get_contents($secretFile));
+            $this->assertSame($before, $staff->fresh()->pin);
+        } finally {
+            unlink($secretFile);
+        }
+    }
+
     public function test_mainnet_details_include_only_matching_approved_pilot_metadata(): void
     {
         $this->getJson('/api/payments/'.$this->payment->id)->assertOk()
             ->assertJsonPath('network_profile_version', 1)
             ->assertJsonPath('mainnet_pilot.user_id', $this->user->id)
             ->assertJsonPath('mainnet_pilot.sender_address', self::SENDER)
-            ->assertJsonPath('mainnet_pilot.merchant_address', self::MERCHANT);
+            ->assertJsonPath('mainnet_pilot.merchant_address', self::MERCHANT)
+            ->assertJsonPath('mainnet_pilot.max_payment_jpyc', '1');
         config(['services.fee_delegation.mainnet_staging.pilot_payment_id' => 999]);
-        $this->getJson('/api/payments/'.$this->payment->id)->assertOk()->assertJsonPath('mainnet_pilot', null);
+        $this->getJson('/api/payments/'.$this->payment->id)->assertOk()
+            ->assertJsonPath('mainnet_pilot.payment_id', $this->payment->id);
+    }
+
+    public function test_mainnet_details_and_model_fail_closed_without_immutable_authorization(): void
+    {
+        DB::table('payments')->where('id', $this->payment->id)->update([
+            'mainnet_authorized_at' => null,
+        ]);
+        $this->payment->refresh();
+
+        $this->getJson('/api/payments/'.$this->payment->id)
+            ->assertOk()
+            ->assertJsonPath('mainnet_pilot', null);
+        $this->assertFalse(
+            app(MainnetPilotPreflightChecker::class)
+                ->check($this->payment->id)
+                ->checks['pilot_payment']['ready']
+        );
+
+        $this->expectException(\LogicException::class);
+        $this->payment->update(['mainnet_authorized_at' => now()]);
     }
 
     public function test_shutdown_status_is_read_only_and_refuses_unknown_remote_or_open_local_gates(): void
@@ -525,6 +810,10 @@ class MainnetPilotPreflightTest extends TestCase
         $this->getJson($url)->assertOk()->assertExactJson(['available' => false]);
         $this->fakeReadOnlyServices(healthOverrides: $this->liveHealth(['pilot_policy' => ['sender_address' => self::MERCHANT]]));
         $this->getJson($url)->assertOk()->assertExactJson(['available' => false]);
+        config(['services.fee_delegation.self_hosted_mainnet.max_payment_jpy' => 2]);
+        $this->fakeReadOnlyServices(healthOverrides: $this->liveHealth());
+        $this->getJson($url)->assertOk()->assertExactJson(['available' => false]);
+        config(['services.fee_delegation.self_hosted_mainnet.max_payment_jpy' => 1]);
         $this->fakeReadOnlyServices(healthOverrides: $this->liveHealth(), healthStatus: 503);
         $this->getJson($url)->assertOk()->assertExactJson(['available' => false]);
         $this->fakeReadOnlyServices(healthOverrides: $this->liveHealth(), healthStatus: 500);
@@ -557,7 +846,7 @@ class MainnetPilotPreflightTest extends TestCase
         config(['services.fee_delegation.mainnet_staging.approved_sender_addresses' => self::SENDER]);
 
         config(['services.fee_delegation.mainnet_staging.pilot_payment_id' => $this->payment->id + 1]);
-        $this->getJson($url)->assertOk()->assertExactJson(['available' => false]);
+        $this->getJson($url)->assertOk()->assertExactJson(['available' => true]);
         config(['services.fee_delegation.mainnet_staging.pilot_payment_id' => $this->payment->id]);
 
         PaymentFeeDelegationAttempt::create([
@@ -576,6 +865,225 @@ class MainnetPilotPreflightTest extends TestCase
         $this->assertDatabaseCount('payment_fee_delegation_attempts', 1);
     }
 
+    public function test_live_store_checkout_authorizes_each_new_mainnet_payment(): void
+    {
+        $this->enableLiveGateForTest();
+        config([
+            'services.fee_delegation.self_hosted_mainnet.max_payment_jpy' => 5000,
+        ]);
+        $this->fakeReadOnlyServices(
+            healthOverrides: $this->liveHealth([
+                'pilot_policy' => ['max_payment_jpyc' => '5000'],
+            ]),
+            senderJpycAtomic: '5000000000000000000000'
+        );
+        $staff = Staff::findOrFail($this->payment->staff_id);
+        Sanctum::actingAs($staff, ['payment:create']);
+
+        $response = $this->postJson('/api/payments/create', ['amount' => 2375])
+            ->assertOk();
+        $payment = Payment::findOrFail($response->json('payment_id'));
+
+        $this->assertNotSame($this->payment->id, $payment->id);
+        $this->assertSame(2375, $payment->amount);
+        $this->assertNotNull($payment->mainnet_authorized_at);
+        $this->getJson('/api/payments/'.$payment->id)
+            ->assertOk()
+            ->assertJsonPath('mainnet_pilot.payment_id', $payment->id)
+            ->assertJsonPath('mainnet_pilot.max_payment_jpyc', '5000');
+        $this->getJson('/api/payments/'.$payment->id.'/sponsorship')
+            ->assertOk()
+            ->assertExactJson(['available' => true]);
+        $expectedAmountWord = str_pad(
+            gmp_strval(gmp_init('2375000000000000000000', 10), 16),
+            64,
+            '0',
+            STR_PAD_LEFT
+        );
+        Http::assertSent(fn (Request $request): bool => ($request['method'] ?? null) === 'eth_estimateGas'
+            && str_ends_with($request['params'][0]['data'] ?? '', $expectedAmountWord));
+        $this->assertDatabaseCount('payment_fee_delegation_attempts', 0);
+    }
+
+    public function test_two_variable_mainnet_payments_keep_distinct_authorization_attempt_and_confirmation_evidence(): void
+    {
+        $this->enableLiveGateForTest();
+        config([
+            'services.fee_delegation.self_hosted_mainnet.max_payment_jpy' => 5000,
+            'services.fee_delegation.self_hosted_mainnet.max_attempts_per_user' => 2,
+            'services.fee_delegation.self_hosted_mainnet.max_attempts_per_store' => 2,
+            'services.fee_delegation.self_hosted_mainnet.max_attempts_per_sender' => 2,
+            'services.fee_delegation.self_hosted_mainnet.max_attempts_global' => 2,
+            'services.fee_delegation.self_hosted_mainnet.daily_transaction_limit' => 2,
+            'services.fee_delegation.self_hosted_mainnet.daily_kaia_budget' => '0.01',
+        ]);
+
+        $staff = Staff::findOrFail($this->payment->staff_id);
+        Sanctum::actingAs($staff, ['payment:create']);
+        $payments = collect([2375, 4999])->map(function (int $amount): Payment {
+            $response = $this->postJson('/api/payments/create', ['amount' => $amount])
+                ->assertOk();
+
+            return Payment::findOrFail($response->json('payment_id'));
+        })->values();
+
+        $hashes = [
+            '0x'.str_repeat('a', 64),
+            '0x'.str_repeat('b', 64),
+        ];
+        $blockHashes = [
+            '0x'.str_repeat('c', 64),
+            '0x'.str_repeat('d', 64),
+        ];
+        $rawTransactions = [
+            $this->mainnetSenderSignedTransaction($payments[0], '1'),
+            $this->mainnetSenderSignedTransaction($payments[1], '2'),
+        ];
+        $byHash = [
+            $hashes[0] => [$payments[0], $blockHashes[0], 16],
+            $hashes[1] => [$payments[1], $blockHashes[1], 17],
+        ];
+        $feePayerRequests = [];
+        $recoveries = 0;
+        $confirmationRpcCalls = 0;
+
+        Http::swap(new Factory);
+        Http::preventStrayRequests();
+        Http::fake(function (Request $request) use (
+            &$feePayerRequests,
+            &$recoveries,
+            &$confirmationRpcCalls,
+            $hashes,
+            $byHash
+        ) {
+            if ($request->url() === 'http://127.0.0.1:19000/api/signAsFeePayer') {
+                $index = count($feePayerRequests);
+                $feePayerRequests[] = [
+                    'raw' => $request['userSignedTx']['raw'] ?? null,
+                    'payment_id' => $request['paymentId'] ?? null,
+                    'expires_at' => $request['expiresAt'] ?? null,
+                    'authorization' => $request['paymentAuthorization'] ?? null,
+                ];
+
+                return Http::response([
+                    'status' => true,
+                    'data' => ['status' => 1, 'hash' => $hashes[$index]],
+                ]);
+            }
+
+            $method = $request['method'] ?? null;
+            if ($method === 'kaia_recoverFromTransaction') {
+                $recoveries++;
+
+                return Http::response([
+                    'jsonrpc' => '2.0', 'id' => 1, 'result' => self::SENDER,
+                ]);
+            }
+
+            $confirmationRpcCalls++;
+            if ($method === 'eth_chainId') {
+                return Http::response([
+                    'jsonrpc' => '2.0', 'id' => 1, 'result' => '0x2019',
+                ]);
+            }
+
+            if ($method === 'eth_getBlockByNumber') {
+                $requestedBlock = $request['params'][0] ?? null;
+                foreach ($byHash as $transactionHash => [$payment, $blockHash, $blockNumber]) {
+                    if ($requestedBlock === '0x'.dechex($blockNumber)) {
+                        return Http::response([
+                            'jsonrpc' => '2.0',
+                            'id' => 1,
+                            'result' => [
+                                'number' => $requestedBlock,
+                                'hash' => $blockHash,
+                                'timestamp' => '0x'.dechex($payment->created_at->addSecond()->timestamp),
+                                'transactions' => [$transactionHash],
+                            ],
+                        ]);
+                    }
+                }
+            }
+
+            $hash = $request['params'][0] ?? null;
+            [$payment, $blockHash, $blockNumber] = $byHash[$hash];
+            $result = match ($method) {
+                'eth_getTransactionByHash' => [
+                    'hash' => $hash,
+                    'blockNumber' => '0x'.dechex($blockNumber),
+                    'blockHash' => $blockHash,
+                    'from' => self::SENDER,
+                ],
+                'eth_getTransactionReceipt' => $this->mainnetReceipt(
+                    $payment,
+                    $hash,
+                    $blockHash,
+                    $blockNumber
+                ),
+                default => null,
+            };
+
+            return Http::response(['jsonrpc' => '2.0', 'id' => 1, 'result' => $result]);
+        });
+
+        Sanctum::actingAs($this->user, ['payment:confirm']);
+        foreach ($payments as $index => $payment) {
+            $this->postJson('/api/payments/'.$payment->id.'/sponsor', [
+                'sender_signed_tx' => $rawTransactions[$index],
+            ])->assertOk()->assertExactJson([
+                'transaction_hash' => $hashes[$index],
+            ]);
+        }
+
+        $this->assertCount(2, $feePayerRequests);
+        foreach ($payments as $index => $payment) {
+            $attempt = PaymentFeeDelegationAttempt::query()
+                ->where('payment_id', $payment->id)
+                ->sole();
+            $request = $feePayerRequests[$index];
+            $this->assertSame((string) $payment->id, $request['payment_id']);
+            $this->assertSame($rawTransactions[$index], $request['raw']);
+            $this->assertSame($payment->expires_at->toIso8601String(), $request['expires_at']);
+            $this->assertSame(hash_hmac(
+                'sha256',
+                MainnetPaymentAuthorization::canonical(
+                    $payment->id,
+                    $request['expires_at'],
+                    $attempt->sender_tx_hash
+                ),
+                hex2bin(str_repeat('c', 64))
+            ), $request['authorization']);
+        }
+
+        foreach ($payments as $index => $payment) {
+            $this->postJson('/api/payments/'.$payment->id.'/confirm', [
+                'tx_hash' => $hashes[$index],
+            ])->assertOk()->assertExactJson(['success' => true]);
+        }
+
+        $attempts = PaymentFeeDelegationAttempt::query()
+            ->whereIn('payment_id', $payments->pluck('id'))
+            ->orderBy('payment_id')
+            ->get();
+        $this->assertCount(2, $attempts);
+        $this->assertNotSame($attempts[0]->sender_tx_hash, $attempts[1]->sender_tx_hash);
+        $this->assertNotSame($attempts[0]->request_fingerprint, $attempts[1]->request_fingerprint);
+        foreach ($payments as $index => $payment) {
+            $confirmed = $payment->fresh();
+            $attempt = $attempts->firstWhere('payment_id', $payment->id);
+            $this->assertSame('confirmed', $confirmed->status);
+            $this->assertSame($hashes[$index], $confirmed->tx_hash);
+            $this->assertSame($this->user->id, $confirmed->user_id);
+            $this->assertSame($hashes[$index], $attempt->tx_hash);
+            $this->assertSame('submitted', $attempt->broadcast_certainty);
+            $this->assertSame('confirmed', $attempt->state);
+            $this->assertNotNull($attempt->receipt_observed_at);
+            $this->assertNotNull($attempt->resolved_at);
+        }
+        $this->assertSame(2, $recoveries);
+        $this->assertSame(8, $confirmationRpcCalls);
+    }
+
     private function enableLiveGateForTest(): void
     {
         config([
@@ -591,6 +1099,111 @@ class MainnetPilotPreflightTest extends TestCase
             'services.fee_delegation.self_hosted_mainnet.enabled' => true,
             'services.fee_delegation.self_hosted_mainnet.kill_switch' => false,
         ]);
+    }
+
+    private function mainnetSenderSignedTransaction(Payment $payment, string $nonce): string
+    {
+        $input = hex2bin('a9059cbb')
+            .str_repeat("\0", 12)
+            .hex2bin(substr($payment->recipient_address, 2))
+            .$this->uintWord($payment->atomic_amount);
+        $fields = [
+            $this->uintBytes($nonce),
+            $this->uintBytes('25000000000'),
+            $this->uintBytes('100000'),
+            hex2bin(substr($payment->token_contract, 2)),
+            '',
+            hex2bin(substr(self::SENDER, 2)),
+            $input,
+            [[
+                $this->uintBytes((string) (($payment->chain_id * 2) + 35)),
+                hex2bin(str_repeat('a', 64)),
+                hex2bin(str_repeat('2', 64)),
+            ]],
+        ];
+
+        return '0x31'.bin2hex($this->rlpEncode($fields));
+    }
+
+    private function mainnetReceipt(
+        Payment $payment,
+        string $hash,
+        string $blockHash,
+        int $blockNumber
+    ): array {
+        return [
+            'transactionHash' => $hash,
+            'blockNumber' => '0x'.dechex($blockNumber),
+            'blockHash' => $blockHash,
+            'status' => '0x1',
+            'logs' => [[
+                'address' => $payment->token_contract,
+                'topics' => [
+                    '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef',
+                    $this->addressTopic(self::SENDER),
+                    $this->addressTopic($payment->recipient_address),
+                ],
+                'data' => '0x'.str_pad(
+                    gmp_strval(gmp_init($payment->atomic_amount, 10), 16),
+                    64,
+                    '0',
+                    STR_PAD_LEFT
+                ),
+                'logIndex' => '0x0',
+                'removed' => false,
+                'transactionHash' => $hash,
+                'blockNumber' => '0x'.dechex($blockNumber),
+                'blockHash' => $blockHash,
+            ]],
+        ];
+    }
+
+    private function addressTopic(string $address): string
+    {
+        return '0x'.str_pad(substr(strtolower($address), 2), 64, '0', STR_PAD_LEFT);
+    }
+
+    private function rlpEncode(array|string $value): string
+    {
+        if (is_array($value)) {
+            $payload = '';
+            foreach ($value as $item) {
+                $payload .= $this->rlpEncode($item);
+            }
+
+            return $this->rlpPrefix(strlen($payload), 0xC0, 0xF7).$payload;
+        }
+
+        if (strlen($value) === 1 && ord($value[0]) <= 0x7F) {
+            return $value;
+        }
+
+        return $this->rlpPrefix(strlen($value), 0x80, 0xB7).$value;
+    }
+
+    private function rlpPrefix(int $length, int $shortOffset, int $longOffset): string
+    {
+        if ($length <= 55) {
+            return chr($shortOffset + $length);
+        }
+        $encodedLength = $this->uintBytes((string) $length);
+
+        return chr($longOffset + strlen($encodedLength)).$encodedLength;
+    }
+
+    private function uintBytes(string $decimal): string
+    {
+        if ($decimal === '0') {
+            return '';
+        }
+        $hex = gmp_strval(gmp_init($decimal, 10), 16);
+
+        return hex2bin(strlen($hex) % 2 === 0 ? $hex : '0'.$hex);
+    }
+
+    private function uintWord(string $decimal): string
+    {
+        return str_pad($this->uintBytes($decimal), 32, "\0", STR_PAD_LEFT);
     }
 
     private function liveHealth(array $overrides = []): array
@@ -659,12 +1272,72 @@ class MainnetPilotPreflightTest extends TestCase
             'staff_id' => $staffId,
             'amount' => 1,
             'status' => 'pending',
+            'mainnet_authorized_at' => now(),
         ], $current->databaseAttributes()));
         config([
             'services.fee_delegation.mainnet_staging.pilot_payment_id' => $this->payment->id,
         ]);
 
         return [$oldest->fresh(), $this->payment];
+    }
+
+    private function createConfirmedHistoryAndCurrent(): array
+    {
+        $confirmed = $this->payment;
+        $transactionHash = '0x'.str_repeat('a', 64);
+        $confirmed->forceFill([
+            'status' => 'confirmed',
+            'tx_hash' => $transactionHash,
+            'observed_chain_id' => 8217,
+            'confirmed_block_number' => 123,
+            'confirmed_block_hash' => '0x'.str_repeat('b', 64),
+            'receipt_status' => 1,
+            'payer_address' => self::SENDER,
+            'transfer_log_index' => 0,
+            'chain_confirmed_at' => now(),
+            'verified_at' => now(),
+            'paid_at' => now(),
+            'user_id' => $this->user->id,
+            'reconciliation_status' => 'pending',
+            'mainnet_authorized_at' => null,
+        ])->saveQuietly();
+        PaymentFeeDelegationAttempt::query()->create([
+            'payment_id' => $confirmed->id,
+            'requester_user_id' => $this->user->id,
+            'network' => 'kaia-mainnet',
+            'chain_id' => 8217,
+            'provider' => 'self-hosted',
+            'sender_address' => self::SENDER,
+            'sender_tx_hash' => '0x'.str_repeat('c', 64),
+            'tx_hash' => $transactionHash,
+            'request_fingerprint' => str_repeat('d', 64),
+            'state' => 'submitted',
+            'broadcast_certainty' => null,
+            'sender_nonce' => '0',
+            'validated_at' => now(),
+            'submitting_at' => now(),
+            'submitted_at' => now(),
+        ]);
+
+        $snapshot = PaymentSnapshot::create(
+            app(NetworkProfileRegistry::class)->get('kaia-mainnet'),
+            self::MERCHANT,
+            '1',
+            now()->addHours(6),
+            1
+        );
+        $this->payment = Payment::query()->create(array_merge([
+            'store_id' => $confirmed->store_id,
+            'staff_id' => $confirmed->staff_id,
+            'amount' => 1,
+            'status' => 'pending',
+            'mainnet_authorized_at' => now(),
+        ], $snapshot->databaseAttributes()));
+        config([
+            'services.fee_delegation.mainnet_staging.pilot_payment_id' => $this->payment->id,
+        ]);
+
+        return [$confirmed->fresh(), $this->payment];
     }
 
     private function createPilotPayment(): array
@@ -701,6 +1374,7 @@ class MainnetPilotPreflightTest extends TestCase
             'amount' => 1,
             'status' => 'pending',
             'expires_at' => $expiresAt,
+            'mainnet_authorized_at' => now(),
         ], $snapshot->databaseAttributes()));
 
         return [$payment, $user];
@@ -743,11 +1417,15 @@ class MainnetPilotPreflightTest extends TestCase
         );
     }
 
-    private function fakeReadOnlyServices(string $balance = '0.02', array $healthOverrides = [], int $healthStatus = 200): void
-    {
+    private function fakeReadOnlyServices(
+        string $balance = '0.02',
+        array $healthOverrides = [],
+        int $healthStatus = 200,
+        string $senderJpycAtomic = '2000000000000000000'
+    ): void {
         Http::swap(new Factory);
         Http::preventStrayRequests();
-        Http::fake(function (Request $request) use ($balance, $healthOverrides, $healthStatus) {
+        Http::fake(function (Request $request) use ($balance, $healthOverrides, $healthStatus, $senderJpycAtomic) {
             if ($request->url() === 'http://127.0.0.1:19000/health') {
                 return Http::response(array_replace_recursive([
                     'status' => 'READ_ONLY_READY',
@@ -770,7 +1448,8 @@ class MainnetPilotPreflightTest extends TestCase
                         'daily_transaction_limit' => '1', 'daily_kaia_budget_wei' => '3750000000000000',
                         'minimum_reserve_wei' => '10000000000000000', 'maximum_balance_wei' => '30000000000000000',
                         'merchant_address' => self::MERCHANT, 'sender_address' => self::SENDER,
-                        'pilot_payment_id' => (string) config('services.fee_delegation.mainnet_staging.pilot_payment_id'),
+                        'authorization_key_id' => 'sha256:c2f480d4dda9f452',
+                        'authorization_mode' => 'hmac-sha256-v1',
                     ],
                 ], $healthOverrides), $healthStatus);
             }
@@ -782,9 +1461,16 @@ class MainnetPilotPreflightTest extends TestCase
                 'eth_estimateGas' => '0x186a0',
                 'eth_gasPrice' => '0x5d21dba00',
                 'eth_getCode' => '0x6000',
-                'eth_call' => $request['params'][0]['data'] === '0x313ce567'
-                    ? '0x'.str_pad(dechex(18), 64, '0', STR_PAD_LEFT)
-                    : $this->abiString('JPYC'),
+                'eth_call' => match (true) {
+                    $request['params'][0]['data'] === '0x313ce567' => '0x'.str_pad(dechex(18), 64, '0', STR_PAD_LEFT),
+                    str_starts_with($request['params'][0]['data'] ?? '', '0x70a08231') => '0x'.str_pad(
+                        gmp_strval(gmp_init($senderJpycAtomic, 10), 16),
+                        64,
+                        '0',
+                        STR_PAD_LEFT
+                    ),
+                    default => $this->abiString('JPYC'),
+                },
                 'eth_getBlockByNumber' => [
                     'number' => '0x64',
                     'hash' => '0x'.str_repeat('a', 64),

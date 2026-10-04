@@ -34,12 +34,7 @@ final class SelfHostedMainnetSponsorshipPolicy
             return $operation();
         }
 
-        $pilotPaymentId = config(
-            'services.fee_delegation.mainnet_staging.pilot_payment_id'
-        );
-        if ((! is_int($pilotPaymentId) && ! is_string($pilotPaymentId))
-            || preg_match('/\A[1-9][0-9]*\z/', (string) $pilotPaymentId) !== 1
-            || (string) $payment->id !== (string) $pilotPaymentId) {
+        if ($payment->mainnet_authorized_at === null) {
             throw new PaymentSponsorshipException(
                 PaymentSponsorshipException::POLICY_REJECTED
             );
@@ -150,19 +145,32 @@ final class SelfHostedMainnetSponsorshipPolicy
             $limits[$key] = (string) $value;
         }
 
+        if (bccomp($limits['max_payment_jpy'], '100000', 0) > 0) {
+            throw new PaymentSponsorshipException(
+                PaymentSponsorshipException::POLICY_REJECTED
+            );
+        }
+
         foreach ([
-            'max_payment_jpy',
             'max_attempts_per_user',
             'max_attempts_per_store',
             'max_attempts_per_sender',
             'max_attempts_global',
             'daily_transaction_limit',
-        ] as $pilotOneLimit) {
-            if ($limits[$pilotOneLimit] !== '1') {
+        ] as $attemptLimit) {
+            if (bccomp($limits[$attemptLimit], '1000', 0) > 0) {
                 throw new PaymentSponsorshipException(
                     PaymentSponsorshipException::POLICY_REJECTED
                 );
             }
+        }
+        if (bccomp($limits['max_attempts_per_user'], $limits['max_attempts_global'], 0) > 0
+            || bccomp($limits['max_attempts_per_store'], $limits['max_attempts_global'], 0) > 0
+            || bccomp($limits['max_attempts_per_sender'], $limits['max_attempts_global'], 0) > 0
+            || bccomp($limits['max_attempts_global'], $limits['daily_transaction_limit'], 0) > 0) {
+            throw new PaymentSponsorshipException(
+                PaymentSponsorshipException::POLICY_REJECTED
+            );
         }
 
         $limits['daily_budget_wei'] = $this->kaiaToWei(

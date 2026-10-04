@@ -131,6 +131,7 @@ class PaymentSponsorshipTest extends TestCase
         $attempt = PaymentFeeDelegationAttempt::where('payment_id', $payment->id)->firstOrFail();
         $this->assertSame('self-hosted', $attempt->provider);
         $this->assertSame('submitted', $attempt->state);
+        $this->assertSame('submitted', $attempt->broadcast_certainty);
         $this->assertSame(self::TX_HASH, $attempt->tx_hash);
         $this->assertSame(hash('sha256', strtolower($raw)), $attempt->request_fingerprint);
         $this->assertMatchesRegularExpression('/\A0x[0-9a-f]{64}\z/', $attempt->sender_tx_hash);
@@ -386,6 +387,7 @@ class PaymentSponsorshipTest extends TestCase
             'payment_id' => $payment->id,
             'state' => 'failed',
             'diagnostic_code' => 'signer_timeout',
+            'broadcast_certainty' => 'definitely_not_broadcast',
             'provider_http_status' => 503,
         ]);
         $attempt = PaymentFeeDelegationAttempt::where('payment_id', $payment->id)
@@ -939,6 +941,36 @@ class PaymentSponsorshipTest extends TestCase
         Http::assertSentCount(2);
     }
 
+    public function test_provider_bad_request_with_possible_broadcast_is_unknown(): void
+    {
+        $payment = $this->createPayment();
+        $this->authenticateUser();
+
+        Http::fake(fn (Request $request) => $request->url() === self::RPC_URL
+            ? $this->recoveredSenderResponse()
+            : Http::response([
+                'status' => false,
+                'error' => 'BAD_REQUEST',
+                'protocol_version' => 2,
+                'broadcast_certainty' => 'broadcast_possible',
+            ], 400));
+
+        $this->postJson("/api/payments/{$payment->id}/sponsor", [
+            'sender_signed_tx' => $this->senderSignedTransaction($payment->amount),
+        ])->assertStatus(502);
+
+        $this->assertDatabaseHas('payment_fee_delegation_attempts', [
+            'payment_id' => $payment->id,
+            'state' => 'unknown_submission',
+            'broadcast_certainty' => 'broadcast_possible',
+            'diagnostic_code' => 'provider_status_unknown',
+        ]);
+        $this->assertDatabaseMissing('payment_fee_delegation_attempts', [
+            'payment_id' => $payment->id,
+            'state' => 'rejected',
+        ]);
+    }
+
     public function test_explicit_reverted_fee_payer_response_is_not_resubmitted(): void
     {
         $payment = $this->createPayment();
@@ -1090,6 +1122,11 @@ class PaymentSponsorshipTest extends TestCase
         );
 
         $this->assertPaymentPending($payment);
+        $this->assertDatabaseHas('payment_fee_delegation_attempts', [
+            'payment_id' => $payment->id,
+            'state' => 'rejected',
+            'broadcast_certainty' => 'definitely_not_broadcast',
+        ]);
         Http::assertSentCount(2);
     }
 

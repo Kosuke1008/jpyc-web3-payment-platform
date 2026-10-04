@@ -5,8 +5,9 @@ namespace App\Blockchain;
 use App\Models\Payment;
 use App\Models\PaymentFeeDelegationAttempt;
 use App\Payments\MainnetPilotGuard;
-use App\Payments\MainnetPilotPaymentHistory;
+use App\Payments\MainnetPilotLimits;
 use App\Payments\PaymentSnapshot;
+use App\Services\Payments\MainnetPaymentAuthorization;
 use Illuminate\Support\Facades\Http;
 use Throwable;
 
@@ -17,13 +18,15 @@ final class MainnetPilotGateStateChecker
         private readonly MainnetPilotGuard $guard,
         private readonly MainnetStagingReadinessChecker $staging,
         private readonly NetworkProfileRegistry $networks,
-        private readonly MainnetPilotPaymentHistory $history,
+        private readonly MainnetPilotLimits $limits,
         private readonly MainnetPilotRpc $rpc,
     ) {}
 
     /** @return array{state: string, live: bool, context: array<string, string>} */
-    public function check(bool $shutdownInvocation = false): array
-    {
+    public function check(
+        bool $shutdownInvocation = false,
+        int|string|null $requestedPaymentId = null
+    ): array {
         try {
             $this->guard->assertDatabase();
             $this->staging->check(readOnly: true);
@@ -66,7 +69,9 @@ final class MainnetPilotGateStateChecker
             && in_array($remote['broadcast'] ?? null, ['ENABLED', 'DISABLED'], true)
             && in_array($remote['kill_switch'] ?? null, ['ACTIVE', 'INACTIVE'], true);
         $pilotId = MainnetPilotGuard::positiveId(
-            config('services.fee_delegation.mainnet_staging.pilot_payment_id')
+            $requestedPaymentId ?? config(
+                'services.fee_delegation.mainnet_staging.pilot_payment_id'
+            )
         );
 
         try {
@@ -86,13 +91,16 @@ final class MainnetPilotGateStateChecker
         $maximum = $policy['maximum_balance_wei'] ?? null;
         $maxGas = $policy['max_gas'] ?? null;
         $maxGasPrice = $policy['max_gas_price_wei'] ?? null;
+        $maxPayment = $policy['max_payment_jpyc'] ?? null;
+        $authorizationKeyId = $policy['authorization_key_id'] ?? null;
+        $authorizationMode = $policy['authorization_mode'] ?? null;
         $pilotReady = $pilotId !== null && ($policy['ready'] ?? null) === true
-            && ($policy['pilot_payment_id'] ?? null) === (string) $pilotId
             && is_string($balance) && preg_match('/\A[0-9]+\z/', $balance) === 1
             && is_string($minimum) && preg_match('/\A[0-9]+\z/', $minimum) === 1
             && is_string($maximum) && preg_match('/\A[0-9]+\z/', $maximum) === 1
             && is_string($maxGas) && preg_match('/\A[1-9][0-9]*\z/', $maxGas) === 1
             && is_string($maxGasPrice) && preg_match('/\A[1-9][0-9]*\z/', $maxGasPrice) === 1
+            && is_string($maxPayment) && preg_match('/\A[1-9][0-9]*\z/', $maxPayment) === 1
             && bccomp($balance, bcadd($minimum, bcmul($maxGas, $maxGasPrice, 0), 0), 0) >= 0
             && bccomp($balance, $maximum, 0) <= 0
             && $attemptCount === 0;
@@ -101,19 +109,33 @@ final class MainnetPilotGateStateChecker
             $snapshot = $payment === null ? null : PaymentSnapshot::fromRecord($payment);
             $profile = $this->networks->active();
             $identities = $this->guard->identities();
+            $limits = $this->limits->validate();
             $pilotReady = $pilotReady && $payment?->status === 'pending'
-                && ($policy['max_payment_jpyc'] ?? null) === '1'
+                && $maxPayment === $limits['max_payment_jpy']
+                && $maxGas === $limits['max_gas']
+                && $maxGasPrice === $limits['max_gas_price_wei']
+                && $minimum === $limits['minimum_reserve_wei']
+                && $maximum === $limits['maximum_balance_wei']
+                && ($policy['rate_window_seconds'] ?? null) === $limits['rate_window_seconds']
+                && ($policy['daily_kaia_budget_wei'] ?? null) === $limits['daily_kaia_budget_wei']
+                && $authorizationKeyId === MainnetPaymentAuthorization::keyId()
+                && $authorizationMode === 'hmac-sha256-v1'
+                && ($policy['max_attempts_per_user'] ?? null) === $limits['max_attempts_per_user']
+                && ($policy['max_attempts_per_store'] ?? null) === $limits['max_attempts_per_store']
+                && ($policy['max_attempts_per_sender'] ?? null) === $limits['max_attempts_per_sender']
+                && ($policy['max_attempts_global'] ?? null) === $limits['max_attempts_global']
+                && ($policy['daily_transaction_limit'] ?? null) === $limits['daily_transaction_limit']
+                && bccomp($snapshot?->displayAmount ?? '0', $maxPayment, 0) <= 0
                 && ($policy['merchant_address'] ?? null) === $identities['merchant']
                 && ($policy['sender_address'] ?? null) === $identities['sender']
                 && ($remote['fee_payer_address'] ?? null) === $identities['fee_payer']
                 && $snapshot?->expiresAt->gt(now()) === true
-                && $payment->id === Payment::query()->max('id')
-                && $this->history->supportsCurrent($payment, $identities, $profile)
                 && $payment->store_id === $identities['store']->id
                 && $payment->staff_id === $identities['staff']->id
                 && $payment->user_id === null
+                && $payment->mainnet_authorized_at !== null
                 && $payment->tx_hash === null
-                && (string) $payment->amount === '1'
+                && $snapshot->displayAmount === (string) $payment->amount
                 && $snapshot->network === 'kaia-mainnet'
                 && $snapshot->networkProfileVersion === $profile->version
                 && $snapshot->chainId === 8217
@@ -121,15 +143,19 @@ final class MainnetPilotGateStateChecker
                 && $snapshot->tokenSymbol === 'JPYC'
                 && $snapshot->tokenDecimals === 18
                 && $snapshot->recipientAddress === $identities['merchant']
-                && $snapshot->displayAmount === '1'
-                && $snapshot->atomicAmount === '1000000000000000000';
+                && $snapshot->atomicAmount === bcmul($snapshot->displayAmount, bcpow('10', '18', 0), 0);
         } catch (Throwable) {
             $pilotReady = false;
         }
         if ($pilotReady) {
             try {
-                $gas = $this->rpc->gas($identities['sender'], $identities['merchant']);
-                $pilotReady = bccomp($gas['observed_required_gas'], $maxGas, 0) <= 0
+                $tokenBalance = $this->rpc->tokenBalance($identities['sender']);
+                $pilotReady = bccomp($tokenBalance['sender_jpyc_atomic'], $snapshot->atomicAmount, 0) >= 0;
+                $gas = $pilotReady
+                    ? $this->rpc->gas($identities['sender'], $identities['merchant'], $snapshot->atomicAmount)
+                    : null;
+                $pilotReady = $gas !== null
+                    && bccomp($gas['observed_required_gas'], $maxGas, 0) <= 0
                     && bccomp($gas['observed_gas_price_wei'], $maxGasPrice, 0) <= 0;
             } catch (Throwable) {
                 $pilotReady = false;

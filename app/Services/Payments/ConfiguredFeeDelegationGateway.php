@@ -22,9 +22,15 @@ final class ConfiguredFeeDelegationGateway implements FeeDelegationGateway
     public function sponsor(
         string $senderSignedTransaction,
         ?int $paymentId = null,
-        ?string $expiresAt = null
+        ?string $expiresAt = null,
+        ?string $paymentAuthorization = null
     ): FeeDelegationSubmission {
-        return $this->selected()->sponsor($senderSignedTransaction, $paymentId, $expiresAt);
+        return $this->selected()->sponsor(
+            $senderSignedTransaction,
+            $paymentId,
+            $expiresAt,
+            $paymentAuthorization
+        );
     }
 
     private function selected(): FeeDelegationGateway

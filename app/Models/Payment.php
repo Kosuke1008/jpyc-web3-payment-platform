@@ -18,6 +18,7 @@ class Payment extends Model
         'display_amount',
         'atomic_amount',
         'expires_at',
+        'mainnet_authorized_at',
     ];
 
     private const CONFIRMATION_EVIDENCE_ATTRIBUTES = [
@@ -62,6 +63,7 @@ class Payment extends Model
         'reconciliation_status',
         'reconciliation_error_code',
         'reconciled_at',
+        'mainnet_authorized_at',
     ];
 
     protected function casts(): array
@@ -72,6 +74,8 @@ class Payment extends Model
             'token_decimals' => 'integer',
             'display_amount' => 'string',
             'expires_at' => 'datetime',
+            'paid_at' => 'datetime',
+            'mainnet_authorized_at' => 'datetime',
             'observed_chain_id' => 'integer',
             'confirmed_block_number' => 'integer',
             'receipt_status' => 'integer',

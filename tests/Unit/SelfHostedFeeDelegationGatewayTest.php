@@ -189,6 +189,34 @@ class SelfHostedFeeDelegationGatewayTest extends TestCase
         );
     }
 
+    public function test_payment_authorization_context_is_forwarded_exactly(): void
+    {
+        $this->configureGateway();
+        $hash = '0x'.str_repeat('a', 64);
+        Http::fake(['*' => Http::response([
+            'status' => true,
+            'protocol_version' => 2,
+            'broadcast_certainty' => 'submitted',
+            'data' => [
+                'status' => '0x1',
+                'hash' => $hash,
+                'transactionHash' => $hash,
+            ],
+        ])]);
+
+        (new SelfHostedFeeDelegationGateway)->sponsor(
+            '0x31',
+            42,
+            '2099-01-01T00:00:00Z',
+            str_repeat('b', 64)
+        );
+
+        Http::assertSent(fn (Request $request): bool =>
+            $request['paymentId'] === '42'
+            && $request['expiresAt'] === '2099-01-01T00:00:00Z'
+            && $request['paymentAuthorization'] === str_repeat('b', 64));
+    }
+
     public function test_unknown_enum_value_is_rejected(): void
     {
         $this->expectException(ValueError::class);

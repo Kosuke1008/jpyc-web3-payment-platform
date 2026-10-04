@@ -8,6 +8,7 @@ use App\Payments\MainnetPilotGuard;
 use App\Payments\MainnetPilotLimits;
 use App\Payments\MainnetPilotPaymentHistory;
 use App\Payments\PaymentSnapshot;
+use App\Services\Payments\MainnetPaymentAuthorization;
 use Throwable;
 
 final class MainnetPilotPreflightChecker
@@ -73,21 +74,28 @@ final class MainnetPilotPreflightChecker
         $this->record($checks, 'pilot_identity', $identities !== null, 'pilot_identity_or_database_relationship_mismatch');
         try {
             $limits = $this->limits->validate();
+            $authorizationKeyId = MainnetPaymentAuthorization::keyId();
             $genericMaxGas = MainnetPilotLimits::integer(config('services.fee_delegation.max_gas'));
             $limitsReady = bccomp($limits['max_gas'], $genericMaxGas, 0) <= 0;
         } catch (Throwable) {
             $limits = null;
+            $authorizationKeyId = null;
             $limitsReady = false;
         }
         $this->record($checks, 'pilot_limits', $limitsReady, 'pilot_limits_invalid_or_exceed_generic_gas_cap');
-        $expectedPolicy = $limits === null || $identities === null || $configuredId === null ? null : [
-            'ready' => true, 'max_payment_jpyc' => '1', 'max_gas' => $limits['max_gas'],
+        $expectedPolicy = $limits === null || $identities === null ? null : [
+            'ready' => true, 'max_payment_jpyc' => $limits['max_payment_jpy'], 'max_gas' => $limits['max_gas'],
             'max_gas_price_wei' => $limits['max_gas_price_wei'], 'rate_window_seconds' => $limits['rate_window_seconds'],
-            'max_attempts_per_user' => '1', 'max_attempts_per_store' => '1', 'max_attempts_per_sender' => '1',
-            'max_attempts_global' => '1', 'daily_transaction_limit' => '1',
+            'max_attempts_per_user' => $limits['max_attempts_per_user'],
+            'max_attempts_per_store' => $limits['max_attempts_per_store'],
+            'max_attempts_per_sender' => $limits['max_attempts_per_sender'],
+            'max_attempts_global' => $limits['max_attempts_global'],
+            'daily_transaction_limit' => $limits['daily_transaction_limit'],
             'daily_kaia_budget_wei' => $limits['daily_kaia_budget_wei'], 'minimum_reserve_wei' => $limits['minimum_reserve_wei'],
             'maximum_balance_wei' => $limits['maximum_balance_wei'], 'merchant_address' => $identities['merchant'],
-            'sender_address' => $identities['sender'], 'pilot_payment_id' => (string) $configuredId,
+            'sender_address' => $identities['sender'],
+            'authorization_key_id' => $authorizationKeyId,
+            'authorization_mode' => 'hmac-sha256-v1',
         ];
         $remotePolicy = $staging->publicContext['fee_payer_pilot_policy'] ?? [];
         $policyMatches = $expectedPolicy !== null;
@@ -97,6 +105,7 @@ final class MainnetPilotPreflightChecker
         $this->record($checks, 'fee_payer_policy', $policyMatches, 'fee_payer_pilot_policy_not_ready_or_mismatched');
 
         $payment = null;
+        $paymentAtomicAmount = null;
         $paymentReady = false;
         try {
             $payment = $idReady ? Payment::find($configuredId) : null;
@@ -107,15 +116,17 @@ final class MainnetPilotPreflightChecker
                     && $payment->store_id === $identities['store']->id
                     && $payment->staff_id === $identities['staff']->id
                     && $payment->user_id === null
-                    && (string) $payment->amount === '1'
+                    && $payment->mainnet_authorized_at !== null
+                    && bccomp((string) $payment->amount, $limits['max_payment_jpy'], 0) <= 0
                     && $payment->created_at !== null && $payment->created_at->lte(now())
                     && $snapshot->expiresAt->gt(now()) && $snapshot->expiresAt->gt($payment->created_at)
                     && $snapshot->network === 'kaia-mainnet' && $snapshot->chainId === 8217
                     && $snapshot->networkProfileVersion === $profile->version
                     && $snapshot->tokenContract === MainnetReadinessChecker::JPYC_CONTRACT
                     && $snapshot->tokenSymbol === 'JPYC' && $snapshot->tokenDecimals === 18
-                    && $snapshot->displayAmount === '1' && $snapshot->atomicAmount === '1000000000000000000'
+                    && $snapshot->displayAmount === (string) $payment->amount
                     && $snapshot->recipientAddress === $identities['merchant'];
+                $paymentAtomicAmount = $snapshot->atomicAmount;
                 $context['payment_id'] = $payment->id;
                 $context['expires_at'] = $snapshot->expiresAt->toIso8601String();
             }
@@ -138,6 +149,7 @@ final class MainnetPilotPreflightChecker
         $this->record($checks, 'no_existing_attempt', $noAttempts, $attemptDiagnostic);
 
         $balanceReady = false;
+        $senderBalanceReady = false;
         $gasReady = false;
         if ($limits !== null && $identities !== null && $profile !== null) {
             $context += [
@@ -151,15 +163,31 @@ final class MainnetPilotPreflightChecker
                 $context += $balance;
                 $balanceReady = bccomp($balance['balance_wei'], $limits['minimum_required_balance_wei'], 0) >= 0
                     && bccomp($balance['balance_wei'], $limits['maximum_balance_wei'], 0) <= 0;
-                $gas = $this->rpc->gas($identities['sender'], $identities['merchant']);
-                $context += $gas;
-                $gasReady = bccomp($gas['observed_required_gas'], $limits['max_gas'], 0) <= 0
-                    && bccomp($gas['observed_gas_price_wei'], $limits['max_gas_price_wei'], 0) <= 0;
             } catch (Throwable) {
                 // Never expose provider URLs or error bodies.
             }
+            if ($paymentReady && $paymentAtomicAmount !== null) {
+                try {
+                    $tokenBalance = $this->rpc->tokenBalance($identities['sender']);
+                    $context += $tokenBalance;
+                    $senderBalanceReady = bccomp($tokenBalance['sender_jpyc_atomic'], $paymentAtomicAmount, 0) >= 0;
+                    if ($senderBalanceReady) {
+                        $gas = $this->rpc->gas(
+                            $identities['sender'],
+                            $identities['merchant'],
+                            $paymentAtomicAmount
+                        );
+                        $context += $gas;
+                        $gasReady = bccomp($gas['observed_required_gas'], $limits['max_gas'], 0) <= 0
+                            && bccomp($gas['observed_gas_price_wei'], $limits['max_gas_price_wei'], 0) <= 0;
+                    }
+                } catch (Throwable) {
+                    // Never expose provider URLs or error bodies.
+                }
+            }
         }
         $this->record($checks, 'fee_payer_balance', $balanceReady, 'fee_payer_balance_unreadable_or_outside_pilot_range');
+        $this->record($checks, 'sender_jpyc_balance', $senderBalanceReady, 'sender_jpyc_balance_unreadable_or_insufficient');
         $this->record($checks, 'gas_observation', $gasReady, 'gas_observation_unavailable_or_above_caps');
 
         return new MainnetPilotPreflightReport(! in_array(false, array_column($checks, 'ready'), true), $checks, $context);

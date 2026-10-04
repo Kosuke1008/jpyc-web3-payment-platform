@@ -19,6 +19,7 @@ class PaymentSponsorshipService
         private readonly FeeDelegationGateway $gateway,
         private readonly NetworkProfileRegistry $networks,
         private readonly KaiaSenderTransactionHash $senderTransactionHash,
+        private readonly MainnetPaymentAuthorization $mainnetAuthorization,
         private readonly ManagedKairosLiveTestPolicy $managedLiveTestPolicy,
         private readonly SelfHostedMainnetSponsorshipPolicy $mainnetPolicy
     ) {}
@@ -88,11 +89,20 @@ class PaymentSponsorshipService
             $latestSnapshot = $this->assertPaymentEligible(Payment::find($payment->id));
             $this->assertFeeDelegationEnabled($profile, $latestSnapshot);
             $this->mainnetPolicy->assertRuntimeGates($latestSnapshot, $provider);
+            $expiresAt = $latestSnapshot->expiresAt->toIso8601String();
+            $paymentAuthorization = $latestSnapshot->network === 'kaia-mainnet'
+                ? $this->mainnetAuthorization->issue(
+                    (int) $payment->id,
+                    $expiresAt,
+                    $senderTxHash
+                )
+                : null;
             $gatewayInvocationStarted = true;
             $submission = $this->gateway->sponsor(
                 $senderSignedTransaction,
                 (int) $payment->id,
-                $latestSnapshot->expiresAt->toIso8601String()
+                $expiresAt,
+                $paymentAuthorization
             );
         } catch (PaymentSponsorshipException $exception) {
             if (! $gatewayInvocationStarted) {
@@ -100,19 +110,10 @@ class PaymentSponsorshipService
                     BroadcastCertainty::DEFINITELY_NOT_BROADCAST
                 );
             }
-            $state = match ($exception->reason) {
-                PaymentSponsorshipException::PROVIDER_REJECTED => FeeDelegationAttemptState::REJECTED,
-                PaymentSponsorshipException::PROVIDER_REVERTED => FeeDelegationAttemptState::REVERTED,
-                PaymentSponsorshipException::SIGNER_PRE_BROADCAST_FAILED,
-                PaymentSponsorshipException::KILL_SWITCH_ACTIVE,
-                PaymentSponsorshipException::PAYMENT_EXPIRED,
-                PaymentSponsorshipException::POLICY_REJECTED,
-                PaymentSponsorshipException::DISABLED,
-                PaymentSponsorshipException::CONFIGURATION_ERROR => FeeDelegationAttemptState::FAILED,
-                default => FeeDelegationAttemptState::UNKNOWN_SUBMISSION,
-            };
+            $state = $this->failureState($exception);
             $this->transitionAttempt($attempt->id, $state, [
                 'provider_http_status' => $exception->upstreamStatus,
+                'broadcast_certainty' => $exception->broadcastCertainty->value,
                 'diagnostic_code' => match ($state) {
                     FeeDelegationAttemptState::REJECTED => 'provider_rejected',
                     FeeDelegationAttemptState::REVERTED => 'transaction_reverted',
@@ -142,12 +143,34 @@ class PaymentSponsorshipService
             [
                 'tx_hash' => $submission->transactionHash,
                 'provider_http_status' => $submission->providerHttpStatus,
+                'broadcast_certainty' => $submission->broadcastCertainty->value,
                 'diagnostic_code' => null,
                 'submitted_at' => now(),
             ]
         );
 
         return $submission->transactionHash;
+    }
+
+    private function failureState(
+        PaymentSponsorshipException $exception
+    ): string {
+        if ($exception->broadcastCertainty !== BroadcastCertainty::DEFINITELY_NOT_BROADCAST
+            && $exception->reason !== PaymentSponsorshipException::PROVIDER_REVERTED) {
+            return FeeDelegationAttemptState::UNKNOWN_SUBMISSION;
+        }
+
+        return match ($exception->reason) {
+            PaymentSponsorshipException::PROVIDER_REJECTED => FeeDelegationAttemptState::REJECTED,
+            PaymentSponsorshipException::PROVIDER_REVERTED => FeeDelegationAttemptState::REVERTED,
+            PaymentSponsorshipException::SIGNER_PRE_BROADCAST_FAILED,
+            PaymentSponsorshipException::KILL_SWITCH_ACTIVE,
+            PaymentSponsorshipException::PAYMENT_EXPIRED,
+            PaymentSponsorshipException::POLICY_REJECTED,
+            PaymentSponsorshipException::DISABLED,
+            PaymentSponsorshipException::CONFIGURATION_ERROR => FeeDelegationAttemptState::FAILED,
+            default => FeeDelegationAttemptState::UNKNOWN_SUBMISSION,
+        };
     }
 
     /** @return array{PaymentFeeDelegationAttempt, ?string} */
@@ -233,8 +256,8 @@ class PaymentSponsorshipService
         string $senderTxHash
     ): array {
         if ($attempt->network === 'kaia-mainnet') {
-            // The single Mainnet pilot never treats an identical retry as a
-            // second authorized HTTP submission, even if the first hash is known.
+            // Mainnet never treats an identical retry as a second authorized
+            // HTTP submission, even if the first hash is known.
             throw new PaymentSponsorshipException(
                 PaymentSponsorshipException::SPONSORSHIP_CONFLICT
             );

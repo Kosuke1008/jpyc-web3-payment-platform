@@ -102,6 +102,9 @@ return [
             'minimum_reserve_kaia' => env(
                 'FEE_PAYER_MIN_RESERVE_KAIA'
             ),
+            'authorization_key' => env(
+                'MAINNET_PAYMENT_AUTHORIZATION_KEY'
+            ),
         ],
         'mainnet_staging' => [
             'pilot_payment_id' => env('MAINNET_PILOT_PAYMENT_ID'),

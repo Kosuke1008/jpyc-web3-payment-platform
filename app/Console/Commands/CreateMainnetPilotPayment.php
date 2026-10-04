@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\Models\Payment;
 use App\Models\PaymentFeeDelegationAttempt;
 use App\Payments\MainnetPilotGuard;
+use App\Payments\MainnetPilotLimits;
 use App\Payments\PaymentSnapshot;
 use Illuminate\Console\Command;
 use RuntimeException;
@@ -12,14 +13,23 @@ use Throwable;
 
 final class CreateMainnetPilotPayment extends Command
 {
-    protected $signature = 'mainnet:create-pilot-payment';
+    protected $signature = 'mainnet:create-pilot-payment
+        {--amount=1 : Integer JPYC amount within the configured pilot maximum}';
 
-    protected $description = 'Create exactly one 1 JPYC staging Payment while all execution gates stay closed';
+    protected $description = 'Create exactly one bounded staging Payment while all execution gates stay closed';
 
-    public function handle(MainnetPilotGuard $guard): int
+    public function handle(
+        MainnetPilotGuard $guard,
+        MainnetPilotLimits $pilotLimits
+    ): int
     {
         try {
-            $result = $guard->transaction(function () use ($guard): array {
+            $amount = MainnetPilotLimits::integer($this->option('amount'));
+            $limits = $pilotLimits->validate();
+            if (bccomp($amount, $limits['max_payment_jpy'], 0) > 0) {
+                throw new RuntimeException('pilot_payment_amount_above_limit');
+            }
+            $result = $guard->transaction(function () use ($guard, $amount, $limits): array {
                 $profile = $guard->profile();
                 $identities = $guard->identities(lock: true);
                 if (Payment::query()->exists() || PaymentFeeDelegationAttempt::query()->exists()
@@ -30,12 +40,19 @@ final class CreateMainnetPilotPayment extends Command
                 if ($ttl === null || $ttl < 60 || $ttl > 86400) {
                     throw new RuntimeException('pilot_expiration_invalid');
                 }
-                $snapshot = PaymentSnapshot::create($profile, $identities['merchant'], '1', now()->addSeconds($ttl), 1);
+                $snapshot = PaymentSnapshot::create(
+                    $profile,
+                    $identities['merchant'],
+                    $amount,
+                    now()->addSeconds($ttl),
+                    (int) $limits['max_payment_jpy']
+                );
                 $payment = Payment::query()->create(array_merge([
                     'store_id' => $identities['store']->id,
                     'staff_id' => $identities['staff']->id,
-                    'amount' => 1,
+                    'amount' => (int) $amount,
                     'status' => 'pending',
+                    'mainnet_authorized_at' => now(),
                 ], $snapshot->databaseAttributes()));
 
                 return [

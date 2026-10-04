@@ -219,13 +219,17 @@ final class MainnetStagingReadinessChecker
                 'ready', 'max_payment_jpyc', 'max_gas', 'max_gas_price_wei', 'rate_window_seconds',
                 'max_attempts_per_user', 'max_attempts_per_store', 'max_attempts_per_sender',
                 'max_attempts_global', 'daily_transaction_limit', 'daily_kaia_budget_wei',
-                'minimum_reserve_wei', 'maximum_balance_wei', 'merchant_address', 'sender_address', 'pilot_payment_id',
+                'minimum_reserve_wei', 'maximum_balance_wei', 'merchant_address', 'sender_address',
+                'authorization_key_id', 'authorization_mode',
             ]));
             foreach ($publicPolicy as $key => $value) {
                 $publicPolicy[$key] = $key === 'ready'
                     ? $value === true
-                    : (is_string($value) && (preg_match('/\A[0-9]{1,78}\z/', $value) === 1
-                        || preg_match('/\A0x[0-9a-f]{40}\z/', $value) === 1) ? $value : '');
+                    : ($key === 'authorization_mode'
+                        ? ($value === 'hmac-sha256-v1' ? $value : '')
+                        : (is_string($value) && (preg_match('/\A[0-9]{1,78}\z/', $value) === 1
+                        || preg_match('/\A0x[0-9a-f]{40}\z/', $value) === 1
+                        || preg_match('/\Asha256:[0-9a-f]{16}\z/', $value) === 1) ? $value : ''));
             }
             $context['fee_payer_pilot_policy'] = $publicPolicy;
         }

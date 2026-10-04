@@ -50,8 +50,17 @@ class PaymentCreateTest extends TestCase
                 'amount',
                 'pay_url',
                 'qr_code',
+                'qr_code_base64',
+                'expires_at',
+                'network',
+                'chain_name',
+                'recipient_address',
+                'token_symbol',
             ])
-            ->assertJsonPath('amount', 1_000);
+            ->assertJsonPath('amount', 1_000)
+            ->assertJsonPath('network', 'kairos')
+            ->assertJsonPath('recipient_address', self::RECIPIENT)
+            ->assertJsonPath('token_symbol', 'JPYC');
 
         $paymentId = $response->json('payment_id');
         $payment = Payment::findOrFail($paymentId);
@@ -79,6 +88,10 @@ class PaymentCreateTest extends TestCase
             $response->json('pay_url')
         );
         $this->assertNotSame('', $response->json('qr_code'));
+        $this->assertSame(
+            $response->json('qr_code'),
+            base64_decode($response->json('qr_code_base64'), true)
+        );
     }
 
     public function test_unauthenticated_request_is_rejected(): void
@@ -159,16 +172,40 @@ class PaymentCreateTest extends TestCase
         $payment->save();
     }
 
-    public function test_mainnet_snapshot_support_does_not_enable_creation(): void
+    public function test_persistence_failure_returns_a_generic_error_without_database_details(): void
     {
         [, $staff] = $this->createStaff();
         Sanctum::actingAs($staff, ['payment:create']);
+        Payment::creating(function (Payment $payment): void {
+            if ($payment->amount === 777) {
+                throw new \RuntimeException(
+                    'SQLSTATE secret database detail must not escape'
+                );
+            }
+        });
+
+        $response = $this->postJson('/api/payments/create', ['amount' => 777])
+            ->assertServiceUnavailable()
+            ->assertExactJson([
+                'error' => 'Payment creation failed safely',
+            ]);
+
+        $this->assertStringNotContainsString('SQLSTATE', $response->getContent());
+        $this->assertDatabaseCount('payments', 0);
+    }
+
+    public function test_mainnet_creation_fails_closed_without_authorized_configuration(): void
+    {
+        [, $staff, $wallet] = $this->createStaff();
+        Sanctum::actingAs($staff, ['payment:create']);
+        $wallet->network = 'kaia-mainnet';
+        $wallet->save();
         config(['blockchain.network' => 'kaia-mainnet']);
 
         $this->postJson('/api/payments/create', ['amount' => 100])
             ->assertServiceUnavailable()
             ->assertExactJson([
-                'error' => 'Payment execution is disabled for this network',
+                'error' => 'Mainnet payment authorization unavailable',
             ]);
 
         $this->assertDatabaseCount('payments', 0);
@@ -198,6 +235,8 @@ class PaymentCreateTest extends TestCase
             ]);
         }
 
-        return [$store, $staff];
+        return $createWallet
+            ? [$store, $staff, $store->wallet()->firstOrFail()]
+            : [$store, $staff];
     }
 }

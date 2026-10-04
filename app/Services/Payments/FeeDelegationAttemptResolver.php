@@ -41,6 +41,7 @@ final class FeeDelegationAttemptResolver
         if ($attempt->state === FeeDelegationAttemptState::SUBMITTING) {
             $this->transition($attempt, FeeDelegationAttemptState::UNKNOWN_SUBMISSION, [
                 'diagnostic_code' => 'interrupted_submission',
+                'broadcast_certainty' => BroadcastCertainty::BROADCAST_POSSIBLE->value,
             ]);
         }
 
@@ -126,6 +127,7 @@ final class FeeDelegationAttemptResolver
             if ($attempt->state === FeeDelegationAttemptState::UNKNOWN_SUBMISSION) {
                 $this->transition($attempt, FeeDelegationAttemptState::SUBMITTED, [
                     'tx_hash' => $hash,
+                    'broadcast_certainty' => BroadcastCertainty::SUBMITTED->value,
                     'submitted_at' => now(),
                     'last_checked_at' => now(),
                     'diagnostic_code' => 'receipt_pending',
@@ -133,6 +135,7 @@ final class FeeDelegationAttemptResolver
             } else {
                 $this->metadata($attempt, [
                     'tx_hash' => $hash,
+                    'broadcast_certainty' => BroadcastCertainty::SUBMITTED->value,
                     'last_checked_at' => now(),
                     'diagnostic_code' => 'receipt_pending',
                 ]);
@@ -146,6 +149,7 @@ final class FeeDelegationAttemptResolver
         if (in_array($receiptStatus, [0, '0', '0x0'], true)) {
             $this->transition($attempt, FeeDelegationAttemptState::REVERTED, [
                 'tx_hash' => $hash,
+                'broadcast_certainty' => BroadcastCertainty::SUBMITTED->value,
                 'receipt_observed_at' => now(),
                 'last_checked_at' => now(),
                 'resolved_at' => now(),
@@ -166,6 +170,7 @@ final class FeeDelegationAttemptResolver
         if ($attempt->state !== FeeDelegationAttemptState::RECEIPT_OBSERVED) {
             $this->transition($attempt, FeeDelegationAttemptState::RECEIPT_OBSERVED, [
                 'tx_hash' => $hash,
+                'broadcast_certainty' => BroadcastCertainty::SUBMITTED->value,
                 'receipt_observed_at' => now(),
                 'last_checked_at' => now(),
                 'diagnostic_code' => null,

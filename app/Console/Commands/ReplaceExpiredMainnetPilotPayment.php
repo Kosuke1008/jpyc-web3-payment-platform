@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Models\Payment;
 use App\Payments\MainnetPilotGuard;
+use App\Payments\MainnetPilotLimits;
 use App\Payments\MainnetPilotPaymentHistory;
 use App\Payments\PaymentSnapshot;
 use Illuminate\Console\Command;
@@ -43,15 +44,16 @@ final class ReplaceExpiredMainnetPilotPayment extends Command
                 $newSnapshot = PaymentSnapshot::create(
                     $profile,
                     $identities['merchant'],
-                    '1',
+                    $snapshot->displayAmount,
                     now()->addSeconds($ttl),
-                    1
+                    (int) MainnetPilotLimits::paymentMaximum()
                 );
                 $new = Payment::query()->create(array_merge([
                     'store_id' => $identities['store']->id,
                     'staff_id' => $identities['staff']->id,
-                    'amount' => 1,
+                    'amount' => (int) $snapshot->displayAmount,
                     'status' => 'pending',
+                    'mainnet_authorized_at' => now(),
                 ], $newSnapshot->databaseAttributes()));
 
                 return [

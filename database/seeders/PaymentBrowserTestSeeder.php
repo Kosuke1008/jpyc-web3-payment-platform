@@ -2,6 +2,8 @@
 
 namespace Database\Seeders;
 
+use App\Blockchain\NetworkProfileRegistry;
+use App\Payments\PaymentSnapshot;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
@@ -23,7 +25,15 @@ class PaymentBrowserTestSeeder extends Seeder
 
     public const EXPIRED_PAYMENT_ID = 910003;
 
+    public const SEQUENTIAL_FIRST_PAYMENT_ID = 910004;
+
+    public const SEQUENTIAL_SECOND_PAYMENT_ID = 910005;
+
     public const PAYMENT_AMOUNT = 125;
+
+    public const SEQUENTIAL_FIRST_AMOUNT = 2375;
+
+    public const SEQUENTIAL_SECOND_AMOUNT = 4999;
 
     public const RECIPIENT_ADDRESS = '0x70997970c51812dc3a010c7d01b50e0d17dc79c8';
 
@@ -107,38 +117,75 @@ class PaymentBrowserTestSeeder extends Seeder
 
             $this->upsertPayment(
                 self::HAPPY_PAYMENT_ID,
+                self::PAYMENT_AMOUNT,
                 $now->copy()->addMinutes(30),
                 $now
             );
             $this->upsertPayment(
                 self::RECOVERY_PAYMENT_ID,
+                self::PAYMENT_AMOUNT,
                 $now->copy()->addMinutes(30),
                 $now
             );
             $this->upsertPayment(
                 self::EXPIRED_PAYMENT_ID,
+                self::PAYMENT_AMOUNT,
                 $now->copy()->subMinute(),
+                $now
+            );
+            $this->upsertPayment(
+                self::SEQUENTIAL_FIRST_PAYMENT_ID,
+                self::SEQUENTIAL_FIRST_AMOUNT,
+                $now->copy()->addMinutes(30),
+                $now
+            );
+            $this->upsertPayment(
+                self::SEQUENTIAL_SECOND_PAYMENT_ID,
+                self::SEQUENTIAL_SECOND_AMOUNT,
+                $now->copy()->addMinutes(30),
                 $now
             );
         });
     }
 
-    private function upsertPayment(int $paymentId, mixed $expiresAt, mixed $now): void
-    {
+    private function upsertPayment(
+        int $paymentId,
+        int $amount,
+        mixed $expiresAt,
+        mixed $now
+    ): void {
+        $snapshot = PaymentSnapshot::create(
+            app(NetworkProfileRegistry::class)->get('kairos'),
+            self::RECIPIENT_ADDRESS,
+            $amount,
+            $expiresAt
+        );
+
         DB::table('payments')->updateOrInsert(
             ['id' => $paymentId],
-            [
+            array_merge([
                 'store_id' => self::STORE_ID,
                 'staff_id' => self::STAFF_ID,
                 'user_id' => null,
-                'amount' => self::PAYMENT_AMOUNT,
+                'amount' => $amount,
                 'status' => 'pending',
                 'tx_hash' => null,
                 'paid_at' => null,
-                'expires_at' => $expiresAt,
+                'observed_chain_id' => null,
+                'confirmed_block_number' => null,
+                'confirmed_block_hash' => null,
+                'receipt_status' => null,
+                'payer_address' => null,
+                'transfer_log_index' => null,
+                'chain_confirmed_at' => null,
+                'verified_at' => null,
+                'reconciliation_status' => null,
+                'reconciliation_error_code' => null,
+                'reconciled_at' => null,
+                'mainnet_authorized_at' => null,
                 'created_at' => $now,
                 'updated_at' => $now,
-            ]
+            ], $snapshot->databaseAttributes())
         );
     }
 }

@@ -11,11 +11,19 @@ final class MainnetPilotLimits
     {
         $config = config('services.fee_delegation.self_hosted_mainnet', []);
         $values = [];
-        foreach (['max_payment_jpy', 'max_attempts_per_user', 'max_attempts_per_store',
+        $values['max_payment_jpy'] = self::paymentMaximum();
+        foreach (['max_attempts_per_user', 'max_attempts_per_store',
             'max_attempts_per_sender', 'max_attempts_global', 'daily_transaction_limit'] as $key) {
-            if (($values[$key] = self::integer($config[$key] ?? null)) !== '1') {
-                throw new RuntimeException('pilot_limit_must_equal_one');
+            $values[$key] = self::integer($config[$key] ?? null);
+            if (bccomp($values[$key], '1000', 0) > 0) {
+                throw new RuntimeException('pilot_attempt_limit_above_ceiling');
             }
+        }
+        if (bccomp($values['max_attempts_per_user'], $values['max_attempts_global'], 0) > 0
+            || bccomp($values['max_attempts_per_store'], $values['max_attempts_global'], 0) > 0
+            || bccomp($values['max_attempts_per_sender'], $values['max_attempts_global'], 0) > 0
+            || bccomp($values['max_attempts_global'], $values['daily_transaction_limit'], 0) > 0) {
+            throw new RuntimeException('pilot_attempt_limit_relationship_invalid');
         }
         foreach (['max_gas', 'max_gas_price_wei', 'rate_window_seconds'] as $key) {
             $values[$key] = self::integer($config[$key] ?? null);
@@ -29,15 +37,36 @@ final class MainnetPilotLimits
         $values['minimum_reserve_wei'] = self::kaiaToWei($config['minimum_reserve_kaia'] ?? null);
         $values['maximum_balance_wei'] = self::kaiaToWei(config('services.fee_delegation.mainnet_staging.pilot_max_fee_payer_balance_kaia'));
         $values['max_transaction_fee_wei'] = bcmul($values['max_gas'], $values['max_gas_price_wei'], 0);
-        $values['minimum_required_balance_wei'] = bcadd($values['max_transaction_fee_wei'], $values['minimum_reserve_wei'], 0);
+        $values['minimum_transaction_balance_wei'] = bcadd(
+            $values['max_transaction_fee_wei'],
+            $values['minimum_reserve_wei'],
+            0
+        );
+        $values['minimum_required_balance_wei'] = bcadd(
+            $values['daily_kaia_budget_wei'],
+            $values['minimum_reserve_wei'],
+            0
+        );
         if (bccomp($values['minimum_reserve_wei'], '0') <= 0
             || bccomp($values['daily_kaia_budget_wei'], $values['max_transaction_fee_wei']) < 0
-            || bccomp($values['daily_kaia_budget_wei'], $values['maximum_balance_wei']) > 0
             || bccomp($values['minimum_required_balance_wei'], $values['maximum_balance_wei']) > 0) {
             throw new RuntimeException('pilot_budget_or_balance_bounds_invalid');
         }
 
         return $values;
+    }
+
+    public static function paymentMaximum(): string
+    {
+        $pilotMaximum = self::integer(
+            config('services.fee_delegation.self_hosted_mainnet.max_payment_jpy')
+        );
+        $genericMaximum = self::integer(config('blockchain.payment_max_jpy'));
+        if (bccomp($pilotMaximum, $genericMaximum, 0) > 0) {
+            throw new RuntimeException('pilot_payment_limit_exceeds_generic_maximum');
+        }
+
+        return $pilotMaximum;
     }
 
     public static function integer(mixed $value): string

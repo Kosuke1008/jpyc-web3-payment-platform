@@ -57,16 +57,24 @@ final class MainnetPilotPaymentHistory
             throw new RuntimeException('pilot_payment_id_does_not_reference_latest_expired_payment');
         }
 
-        if ($payments->contains(
-            fn (Payment $payment): bool => ! $this->isExpiredUnused(
-                $payment,
-                $identities,
-                $profile
-            )
-        )) {
+        $attempts = $this->attemptsFor($payments);
+        $history = $payments->slice(0, -1)->values();
+        if (! $this->isExpiredUnused($latest, $identities, $profile)
+            || $history->contains(
+                fn (Payment $payment): bool => ! $this->isExpiredUnused($payment, $identities, $profile)
+                    && ! $this->isConfirmedHistoricalPayment($payment, $identities, $profile)
+            )) {
             throw new RuntimeException('expired_pilot_history_invalid');
         }
-        if ($this->hasUnsafeFeeDelegationAttempts($payments)) {
+        if (! $this->hasSafeUnusedAttempts($latest, $attempts)
+            || $history->contains(
+                fn (Payment $payment): bool => ! $this->hasSafeHistoricalAttempts(
+                    $payment,
+                    $attempts,
+                    $identities,
+                    $profile
+                )
+            )) {
             throw new RuntimeException('fee_delegation_attempt_exists');
         }
         if ($this->hasLegacyTransaction($payments)) {
@@ -89,15 +97,16 @@ final class MainnetPilotPaymentHistory
         }
 
         $history = $payments->where('id', '<', $current->id)->values();
+        $attempts = $this->attemptsFor($history);
         if ($history->count() !== $payments->count() - 1
             || $history->contains(
-                fn (Payment $payment): bool => ! $this->isExpiredUnused(
+                fn (Payment $payment): bool => ! $this->isSafeHistoricalPayment(
                     $payment,
+                    $attempts,
                     $identities,
                     $profile
                 )
-            )
-            || $this->hasUnsafeFeeDelegationAttempts($history)) {
+            )) {
             return false;
         }
 
@@ -112,13 +121,14 @@ final class MainnetPilotPaymentHistory
     ): bool {
         try {
             $snapshot = PaymentSnapshot::fromRecord($payment);
+            $maximum = MainnetPilotLimits::paymentMaximum();
         } catch (Throwable) {
             return false;
         }
 
         return $payment->store_id === $identities['store']->id
             && $payment->staff_id === $identities['staff']->id
-            && (string) $payment->amount === '1'
+            && bccomp((string) $payment->amount, $maximum, 0) <= 0
             && $payment->status === 'pending'
             && $snapshot->expiresAt->lt(now())
             && $snapshot->network === 'kaia-mainnet'
@@ -128,53 +138,192 @@ final class MainnetPilotPaymentHistory
             && $snapshot->tokenSymbol === 'JPYC'
             && $snapshot->tokenDecimals === 18
             && $snapshot->recipientAddress === $identities['merchant']
-            && $snapshot->displayAmount === '1'
-            && $snapshot->atomicAmount === '1000000000000000000'
+            && $snapshot->displayAmount === (string) $payment->amount
+            && $snapshot->atomicAmount === bcmul($snapshot->displayAmount, bcpow('10', '18', 0), 0)
             && collect(self::EVIDENCE_FIELDS)->every(
                 fn (string $field): bool => $payment->getRawOriginal($field) === null
             );
     }
 
-    /** @param Collection<int, Payment> $payments */
-    private function hasUnsafeFeeDelegationAttempts(Collection $payments): bool
+    /**
+     * @param  Collection<int, PaymentFeeDelegationAttempt>  $attempts
+     * @param  array{store: mixed, staff: mixed, user: mixed, merchant: string, sender: string}  $identities
+     */
+    private function isSafeHistoricalPayment(
+        Payment $payment,
+        Collection $attempts,
+        array $identities,
+        NetworkProfile $profile
+    ): bool {
+        if ($this->isExpiredUnused($payment, $identities, $profile)) {
+            return $this->hasSafeUnusedAttempts($payment, $attempts);
+        }
+
+        return $this->isConfirmedHistoricalPayment($payment, $identities, $profile)
+            && $this->hasSafeConfirmedAttempt($payment, $attempts, $identities);
+    }
+
+    /**
+     * @param  Collection<int, PaymentFeeDelegationAttempt>  $attempts
+     * @param  array{store: mixed, staff: mixed, user: mixed, merchant: string, sender: string}  $identities
+     */
+    private function hasSafeHistoricalAttempts(
+        Payment $payment,
+        Collection $attempts,
+        array $identities,
+        NetworkProfile $profile
+    ): bool {
+        return $this->isExpiredUnused($payment, $identities, $profile)
+            ? $this->hasSafeUnusedAttempts($payment, $attempts)
+            : $this->hasSafeConfirmedAttempt($payment, $attempts, $identities);
+    }
+
+    /** @return Collection<int, PaymentFeeDelegationAttempt> */
+    private function attemptsFor(Collection $payments): Collection
     {
         if ($payments->isEmpty()) {
+            return collect();
+        }
+
+        return PaymentFeeDelegationAttempt::query()
+            ->whereIn('payment_id', $payments->pluck('id'))
+            ->get();
+    }
+
+    /** @param Collection<int, PaymentFeeDelegationAttempt> $attempts */
+    private function hasSafeUnusedAttempts(Payment $payment, Collection $attempts): bool
+    {
+        $paymentAttempts = $attempts
+            ->where('payment_id', $payment->id)
+            ->values();
+
+        if ($paymentAttempts->isEmpty()) {
+            return true;
+        }
+
+        if ($paymentAttempts->count() !== 1) {
             return false;
         }
 
-        $attempts = PaymentFeeDelegationAttempt::query()
-            ->whereIn('payment_id', $payments->pluck('id'))
-            ->get();
+        $attempt = $paymentAttempts->first();
 
-        return $payments->contains(function (Payment $payment) use ($attempts): bool {
-            $paymentAttempts = $attempts
-                ->where('payment_id', $payment->id)
-                ->values();
+        return $attempt instanceof PaymentFeeDelegationAttempt
+            && $attempt->provider === 'self-hosted'
+            && $attempt->state === 'rejected'
+            && $attempt->provider_http_status === 400
+            && $attempt->diagnostic_code === 'provider_rejected'
+            && $attempt->broadcast_certainty === 'definitely_not_broadcast'
+            && $attempt->tx_hash === null
+            && $attempt->validated_at !== null
+            && $attempt->submitting_at !== null
+            && $attempt->submitted_at === null
+            && $attempt->receipt_observed_at === null
+            && $attempt->resolved_at !== null;
+    }
 
-            if ($paymentAttempts->isEmpty()) {
-                return false;
-            }
+    /** @param array{store: mixed, staff: mixed, user: mixed, merchant: string, sender: string} $identities */
+    private function isConfirmedHistoricalPayment(
+        Payment $payment,
+        array $identities,
+        NetworkProfile $profile
+    ): bool {
+        try {
+            $snapshot = PaymentSnapshot::fromRecord($payment);
+            $maximum = MainnetPilotLimits::paymentMaximum();
+        } catch (Throwable) {
+            return false;
+        }
 
-            if ($paymentAttempts->count() !== 1) {
-                return true;
-            }
+        return $payment->store_id === $identities['store']->id
+            && $payment->staff_id === $identities['staff']->id
+            && $payment->user_id === $identities['user']->id
+            && bccomp((string) $payment->amount, $maximum, 0) <= 0
+            && $payment->status === 'confirmed'
+            && $this->isHash($payment->tx_hash)
+            && $payment->observed_chain_id === 8217
+            && is_int($payment->confirmed_block_number)
+            && $payment->confirmed_block_number > 0
+            && $this->isHash($payment->confirmed_block_hash)
+            && $payment->receipt_status === 1
+            && is_string($payment->payer_address)
+            && hash_equals(strtolower($identities['sender']), strtolower($payment->payer_address))
+            && is_int($payment->transfer_log_index)
+            && $payment->transfer_log_index >= 0
+            && $payment->chain_confirmed_at !== null
+            && $payment->verified_at !== null
+            && $payment->paid_at !== null
+            && in_array($payment->reconciliation_status, [
+                'pending',
+                'verified',
+            ], true)
+            && $snapshot->network === 'kaia-mainnet'
+            && $snapshot->networkProfileVersion === $profile->version
+            && $snapshot->chainId === 8217
+            && $snapshot->tokenContract === strtolower($profile->jpycContract)
+            && $snapshot->tokenSymbol === 'JPYC'
+            && $snapshot->tokenDecimals === 18
+            && $snapshot->recipientAddress === $identities['merchant']
+            && $snapshot->displayAmount === (string) $payment->amount
+            && $snapshot->atomicAmount === bcmul($snapshot->displayAmount, bcpow('10', '18', 0), 0);
+    }
 
-            $attempt = $paymentAttempts->first();
+    /**
+     * @param  Collection<int, PaymentFeeDelegationAttempt>  $attempts
+     * @param  array{user: mixed, sender: string}  $identities
+     */
+    private function hasSafeConfirmedAttempt(
+        Payment $payment,
+        Collection $attempts,
+        array $identities
+    ): bool {
+        $paymentAttempts = $attempts
+            ->where('payment_id', $payment->id)
+            ->values();
+        if ($paymentAttempts->count() !== 1) {
+            return false;
+        }
 
-            return ! (
-                $attempt instanceof PaymentFeeDelegationAttempt
-                && $attempt->provider === 'self-hosted'
-                && $attempt->state === 'rejected'
-                && $attempt->provider_http_status === 400
-                && $attempt->diagnostic_code === 'provider_rejected'
-                && $attempt->tx_hash === null
-                && $attempt->validated_at !== null
-                && $attempt->submitting_at !== null
-                && $attempt->submitted_at === null
-                && $attempt->receipt_observed_at === null
-                && $attempt->resolved_at !== null
-            );
-        });
+        $attempt = $paymentAttempts->first();
+        if (! $attempt instanceof PaymentFeeDelegationAttempt
+            || $attempt->requester_user_id !== $identities['user']->id
+            || $attempt->network !== 'kaia-mainnet'
+            || $attempt->chain_id !== 8217
+            || $attempt->provider !== 'self-hosted'
+            || ! is_string($attempt->sender_address)
+            || ! hash_equals(strtolower($identities['sender']), strtolower($attempt->sender_address))
+            || ! $this->isHash($attempt->sender_tx_hash)
+            || ! $this->isHash($attempt->tx_hash)
+            || ! hash_equals(strtolower($payment->tx_hash), strtolower($attempt->tx_hash))
+            || ! is_string($attempt->request_fingerprint)
+            || preg_match('/\A[0-9a-f]{64}\z/', $attempt->request_fingerprint) !== 1
+            || preg_match('/\A(?:0|[1-9][0-9]{0,19})\z/', (string) $attempt->sender_nonce) !== 1
+            || $attempt->validated_at === null
+            || $attempt->submitting_at === null
+            || $attempt->submitted_at === null) {
+            return false;
+        }
+
+        $modern = $attempt->state === 'confirmed'
+            && $attempt->broadcast_certainty === 'submitted'
+            && $attempt->receipt_observed_at !== null
+            && $attempt->resolved_at !== null;
+
+        // Payment 1 predates broadcast_certainty and attempt resolution. Its
+        // immutable Payment evidence is complete, so accept it only as closed
+        // history; it never becomes retryable or replacement-eligible.
+        $legacyConfirmed = $payment->mainnet_authorized_at === null
+            && $attempt->state === 'submitted'
+            && $attempt->broadcast_certainty === null
+            && $attempt->receipt_observed_at === null
+            && $attempt->resolved_at === null;
+
+        return $modern || $legacyConfirmed;
+    }
+
+    private function isHash(mixed $value): bool
+    {
+        return is_string($value)
+            && preg_match('/\A0x[0-9a-fA-F]{64}\z/', $value) === 1;
     }
 
     /** @param Collection<int, Payment> $payments */

@@ -21,7 +21,8 @@ abstract class KaiaFeeDelegationHttpGateway implements FeeDelegationGateway
     public function sponsor(
         string $senderSignedTransaction,
         ?int $paymentId = null,
-        ?string $expiresAt = null
+        ?string $expiresAt = null,
+        ?string $paymentAuthorization = null
     ): FeeDelegationSubmission {
         [$url, $apiKey, $timeout] = $this->configuration();
 
@@ -38,8 +39,12 @@ abstract class KaiaFeeDelegationHttpGateway implements FeeDelegationGateway
                 rtrim($url, '/').'/api/signAsFeePayer',
                 array_filter([
                     'userSignedTx' => ['raw' => $senderSignedTransaction],
-                    'paymentId' => $paymentId,
+                    'paymentId' => $paymentAuthorization !== null
+                        && $paymentId !== null
+                            ? (string) $paymentId
+                            : $paymentId,
                     'expiresAt' => $expiresAt,
+                    'paymentAuthorization' => $paymentAuthorization,
                 ], fn (mixed $value): bool => $value !== null)
             );
         } catch (ConnectionException $exception) {
